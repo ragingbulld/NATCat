@@ -4,6 +4,8 @@ NATCat is a single-binary NAT mapping console with an embedded WebUI. It is desi
 
 The project is written in Go and ships the frontend as embedded static assets, so deployment is one binary plus one JSON data file.
 
+中文快速上手: [docs/quick-start.zh-CN.md](docs/quick-start.zh-CN.md)
+
 ## Features
 
 - Built-in authenticated WebUI
