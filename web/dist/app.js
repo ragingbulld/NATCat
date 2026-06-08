@@ -8,6 +8,8 @@ const state = {
   },
   serverGroupsDirty: false,
   poller: null,
+  checkPoller: null,
+  checkRunInFlight: false,
   filter: "all",
   search: "",
   copiedAddressKey: null,
@@ -47,7 +49,6 @@ const el = {
   keepAliveGroupTitle: document.querySelector("#keepAliveGroupTitle"),
   keepAliveGroupHint: document.querySelector("#keepAliveGroupHint"),
   probeTimingRow: document.querySelector("#probeTimingRow"),
-  udpStunCycleField: document.querySelector("#udpStunCycleField"),
   httpHostLabel: document.querySelector("#httpHostLabel"),
   httpPortLabel: document.querySelector("#httpPortLabel"),
   keepAliveSecondsField: document.querySelector("#keepAliveSecondsField"),
@@ -88,7 +89,6 @@ function emptyConfig() {
     httpPort: 80,
     interface: "",
     keepAliveSeconds: 30,
-    udpStunCycle: 10,
     mappingConfirmations: 3,
     notifyScript: "",
     fwMark: 0,
@@ -130,6 +130,10 @@ function showLogin() {
     clearInterval(state.poller);
     state.poller = null;
   }
+  if (state.checkPoller) {
+    clearInterval(state.checkPoller);
+    state.checkPoller = null;
+  }
 }
 
 function showApp() {
@@ -137,6 +141,9 @@ function showApp() {
   el.app.classList.remove("hidden");
   if (!state.poller) {
     state.poller = setInterval(() => loadInstances().catch(() => {}), 3000);
+  }
+  if (!state.checkPoller) {
+    state.checkPoller = setInterval(() => runVisibleTCPChecks().catch(() => {}), 30000);
   }
 }
 
@@ -432,7 +439,7 @@ function createKeepAliveCard(cfg, keep) {
     latencyPill.textContent = latency;
     metrics.append(latencyPill);
   }
-  const age = cfg.protocol === "udp" ? "" : keepAliveAge(keep);
+  const age = keepAliveAge(keep);
   if (age) {
     const agePill = document.createElement("span");
     agePill.className = "keepalive-metric age";
@@ -587,6 +594,37 @@ function triggerInitialChecks() {
       state.initialChecked.delete(key);
     });
   });
+}
+
+async function runVisibleTCPChecks() {
+  if (state.checkRunInFlight) {
+    return;
+  }
+  const targets = state.instances.filter((item) => {
+    return (
+      item.config.protocol === "tcp" &&
+      item.runtime.state === "running" &&
+      item.runtime.publicAddress &&
+      item.runtime.publicPort
+    );
+  });
+  if (targets.length === 0) {
+    return;
+  }
+  state.checkRunInFlight = true;
+  try {
+    await Promise.allSettled(
+      targets.map((item) =>
+        api(`/api/instances/${item.config.id}/check`, {
+          method: "POST",
+          body: "{}",
+        }),
+      ),
+    );
+    await loadInstances();
+  } finally {
+    state.checkRunInFlight = false;
+  }
 }
 
 function portCheckKey(item) {
@@ -968,7 +1006,6 @@ function fillForm(cfg) {
   f.httpPort.value = cfg.httpPort || ((cfg.protocol || "tcp") === "udp" ? 443 : 80);
   f.interface.value = cfg.interface || "";
   f.keepAliveSeconds.value = cfg.keepAliveSeconds || 30;
-  f.udpStunCycle.value = cfg.udpStunCycle || 10;
   f.mappingConfirmations.value = cfg.mappingConfirmations || 3;
   f.notifyScript.value = cfg.notifyScript || "";
   f.fwMark.value = cfg.fwMark || 0;
@@ -996,7 +1033,6 @@ function readForm() {
     httpPort: numberValue(f.httpPort.value, f.protocol.value === "udp" ? 443 : 80),
     interface: f.interface.value.trim(),
     keepAliveSeconds: numberValue(f.keepAliveSeconds.value, 30),
-    udpStunCycle: numberValue(f.udpStunCycle.value, 10),
     mappingConfirmations: numberValue(f.mappingConfirmations.value, 3),
     notifyScript: f.notifyScript.value.trim(),
     fwMark: numberValue(f.fwMark.value, 0),
@@ -1305,7 +1341,6 @@ function toggleConditionalFields() {
   el.stunGroupFields.classList.toggle("hidden", !stunUsesGroup);
   el.httpFields.classList.toggle("hidden", keepAliveUsesGroup);
   el.keepAliveGroupFields.classList.toggle("hidden", !keepAliveUsesGroup);
-  el.udpStunCycleField.classList.toggle("hidden", !isUDP);
   el.probeTimingRow?.classList.toggle("udp", isUDP);
 }
 
@@ -1345,11 +1380,7 @@ function setProtocol(protocol) {
     if (value === "tcp" && ["", "cloudflare.com", "zhuanlan.zhihu.com"].includes(host)) {
       el.form.elements.httpHost.value = "qq.com";
     }
-    const keep = el.form.elements.keepAliveSeconds.value.trim();
-    if (value === "udp" && (!keep || keep === "30")) {
-      el.form.elements.keepAliveSeconds.value = "10";
-    }
-    if (value === "tcp" && (!keep || keep === "10")) {
+    if (!el.form.elements.keepAliveSeconds.value.trim()) {
       el.form.elements.keepAliveSeconds.value = "30";
     }
   }

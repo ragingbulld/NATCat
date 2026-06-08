@@ -63,7 +63,6 @@ type InstanceConfig struct {
 	HTTPPort             int    `json:"httpPort"`
 	Interface            string `json:"interface"`
 	KeepAliveSeconds     int    `json:"keepAliveSeconds"`
-	UDPSTUNCycle         int    `json:"udpStunCycle"`
 	MappingConfirmations int    `json:"mappingConfirmations"`
 	NotifyScript         string `json:"notifyScript"`
 	FWMark               uint32 `json:"fwMark"`
@@ -103,9 +102,6 @@ type KeepAlive struct {
 	Address     string    `json:"address"`
 	Port        int       `json:"port"`
 	LatencyMs   int64     `json:"latencyMs,omitempty"`
-	LossPercent int       `json:"lossPercent"`
-	ProbeCount  int       `json:"probeCount,omitempty"`
-	LostProbes  int       `json:"lostProbes,omitempty"`
 	ConnectedAt time.Time `json:"connectedAt,omitempty"`
 	LastSeenAt  time.Time `json:"lastSeenAt,omitempty"`
 	Message     string    `json:"message"`

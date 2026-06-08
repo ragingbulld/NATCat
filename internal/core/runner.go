@@ -24,10 +24,13 @@ import (
 const (
 	quicInitialConnectTimeout   = 8 * time.Second
 	quicReconnectTimeout        = 4 * time.Second
-	quicKeepAliveRequestTimeout = 5 * time.Second
-	tcpKeepAliveRequestTimeout  = 5 * time.Second
+	quicKeepAliveRequestTimeout = 2 * time.Second
+	tcpKeepAliveRequestTimeout  = 2 * time.Second
 	tcpPublicProbeDialTimeout   = 5 * time.Second
-	tcpReconnectVisibleDuration = 3500 * time.Millisecond
+	reconnectVisibleDuration    = 3500 * time.Millisecond
+	udpPublicProbeTimeout       = 15 * time.Second
+	udpSTUNResponseTimeout      = 1200 * time.Millisecond
+	udpSTUNRetries              = 3
 )
 
 var publicProbeConfirmDelay = 500 * time.Millisecond
@@ -49,8 +52,6 @@ type Runner struct {
 	mapMu             sync.Mutex
 	lastMap           *mappingEvent
 	mappingLogEmitted bool
-	keepMu            sync.Mutex
-	keepSamples       []bool
 	udpQueries        int
 	publicStableSince time.Time
 	publicUpdatedAt   time.Time
@@ -289,7 +290,7 @@ func (r *Runner) runTCP(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := waitMinimumTCPReconnectVisible(ctx, reconnectingAt); err != nil {
+		if err := waitMinimumReconnectVisible(ctx, reconnectingAt); err != nil {
 			nextUntrack()
 			closeTCP(nextConn, true)
 			return err
@@ -337,7 +338,6 @@ func (r *Runner) reconnectTCPKeepAliveWithoutSTUN(ctx context.Context, event map
 				return ServerEndpoint{}, nil, nil, nil, 0, errStopped
 			}
 			lastErr = err
-			r.recordKeepAliveProbe(false)
 			if isLocalPortUnavailable(err) {
 				r.advanceBindPort()
 				r.emit(RuntimeStatus{
@@ -372,8 +372,8 @@ func (r *Runner) reconnectTCPKeepAliveWithoutSTUN(ctx context.Context, event map
 	}
 }
 
-func waitMinimumTCPReconnectVisible(ctx context.Context, since time.Time) error {
-	remaining := tcpReconnectVisibleDuration - time.Since(since)
+func waitMinimumReconnectVisible(ctx context.Context, since time.Time) error {
+	remaining := reconnectVisibleDuration - time.Since(since)
 	if remaining <= 0 {
 		return nil
 	}
@@ -590,12 +590,10 @@ func (r *Runner) tcpKeepAlive(ctx context.Context, conn *net.TCPConn, endpoint S
 			if ctx.Err() != nil {
 				return errStopped
 			}
-			r.recordKeepAliveProbe(false)
 			return fmt.Errorf("%w: tcp keep-alive write: %v", errSessionClosed, err)
 		}
 
 		if err := conn.SetReadDeadline(time.Now().Add(tcpKeepAliveRequestTimeout)); err != nil {
-			r.recordKeepAliveProbe(false)
 			return fmt.Errorf("%w: tcp keep-alive read deadline: %v", errSessionClosed, err)
 		}
 		resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodHead})
@@ -603,7 +601,6 @@ func (r *Runner) tcpKeepAlive(ctx context.Context, conn *net.TCPConn, endpoint S
 			if ctx.Err() != nil {
 				return errStopped
 			}
-			r.recordKeepAliveProbe(false)
 			if errors.Is(err, io.EOF) {
 				return fmt.Errorf("%w: tcp keep-alive closed by peer", errSessionClosed)
 			}
@@ -615,17 +612,12 @@ func (r *Runner) tcpKeepAlive(ctx context.Context, conn *net.TCPConn, endpoint S
 		}
 
 		if resp.Close {
-			r.recordKeepAliveProbe(false)
 			return fmt.Errorf("%w: tcp keep-alive response requested close", errSessionClosed)
 		}
 		latency := tcpRTTMilliseconds(conn, lastLatency)
 		lastLatency = latency
-		r.recordKeepAliveProbe(true)
 		r.emitKeepAlive(KeepAliveConnected, "tcp", conn.RemoteAddr(), fmt.Sprintf("tcp rtt %dms", latency), latency)
 		if err := r.waitTCPKeepAliveInterval(ctx, conn, reader, interval); err != nil {
-			if !errors.Is(err, errStopped) {
-				r.recordKeepAliveProbe(false)
-			}
 			return err
 		}
 	}
@@ -723,7 +715,6 @@ func (r *Runner) runUDP(ctx context.Context) error {
 			_ = quicTransport.Close()
 		}
 	}()
-	r.recordKeepAliveProbe(true)
 	r.emitKeepAlive(KeepAliveConnected, "udp", quicAddr, fmt.Sprintf("quic rtt %dms", connectLatency), connectLatency)
 
 	if ctx.Err() != nil {
@@ -751,27 +742,10 @@ func (r *Runner) runUDP(ctx context.Context) error {
 	}
 	r.publishMapping(event)
 
-	keepCount := 0
 	for {
 		latency, keepErr := r.quicKeepAliveOnce(ctx, quicTransport, keepEndpoint, quicAddr)
 		if !errors.Is(keepErr, errSessionClosed) {
 			if keepErr == nil {
-				keepCount++
-				if keepCount >= r.cfg.UDPSTUNCycle {
-					keepCount = 0
-					result, err := r.confirmedUDPPublicProbe(ctx, network, conn, sharedConn.stunResponses, stunServers(r.cfg))
-					if err != nil {
-						return fmt.Errorf("%w: periodic udp public probe failed: %v", errSessionClosed, err)
-					}
-					event = mappingEvent{
-						PublicIP:    result.IP,
-						PublicPort:  result.Port,
-						PrivateIP:   privateIP,
-						PrivatePort: privatePort,
-						Protocol:    "udp",
-					}
-					r.publishMapping(event)
-				}
 				_ = latency
 				continue
 			}
@@ -779,23 +753,35 @@ func (r *Runner) runUDP(ctx context.Context) error {
 			return keepErr
 		}
 		_ = quicTransport.Close()
+		reconnectingAt := time.Now()
 		r.emitKeepAlive(KeepAliveReconnecting, "udp", quicAddr, keepErr.Error(), 0)
 		if ctx.Err() != nil {
 			return errStopped
 		}
 
-		nextEndpoint, nextAddr, nextTransport, err := r.reconnectQUICKeepAliveBeforeSTUN(ctx, sharedConn, network, keepEndpoint)
+		nextEndpoint, nextAddr, nextTransport, nextLatency, err := r.reconnectQUICKeepAliveBeforeSTUN(ctx, sharedConn, network, keepEndpoint)
 		if err != nil {
 			return err
 		}
 		keepEndpoint = nextEndpoint
 		quicAddr = nextAddr
 		quicTransport = nextTransport
-		keepCount = 0
 
 		result, err := r.confirmedUDPPublicProbe(ctx, network, conn, sharedConn.stunResponses, stunServers(r.cfg))
 		if err != nil {
+			_ = quicTransport.Close()
+			r.emit(RuntimeStatus{
+				Logs: []LogEntry{{
+					At:      time.Now(),
+					Level:   "error",
+					Message: fmt.Sprintf("udp public probe after quic reconnect failed: %v", err),
+				}},
+			})
 			return fmt.Errorf("%w: udp public probe after quic reconnect failed: %v", errSessionClosed, err)
+		}
+		if err := waitMinimumReconnectVisible(ctx, reconnectingAt); err != nil {
+			_ = quicTransport.Close()
+			return err
 		}
 		event = mappingEvent{
 			PublicIP:    result.IP,
@@ -804,7 +790,35 @@ func (r *Runner) runUDP(ctx context.Context) error {
 			PrivatePort: privatePort,
 			Protocol:    "udp",
 		}
-		r.publishMapping(event)
+		changed, stableSince, updatedAt := r.updateMapping(event)
+		logs := []LogEntry{{
+			At:      time.Now(),
+			Level:   "info",
+			Message: fmt.Sprintf("udp public mapping confirmed after quic reconnect: %s", formatPublicProbeResult(result)),
+		}}
+		if changed || !r.mappingLogEmitted {
+			logs = append(logs, LogEntry{
+				At:      time.Now(),
+				Level:   "info",
+				Message: fmt.Sprintf("mapped %s:%d -> %s:%d", event.PublicIP.String(), event.PublicPort, event.PrivateIP.String(), event.PrivatePort),
+			})
+			r.mappingLogEmitted = true
+		}
+		r.emit(RuntimeStatus{
+			State:             StateRunning,
+			PublicAddress:     event.PublicIP.String(),
+			PublicPort:        event.PublicPort,
+			PublicStableSince: stableSince,
+			PublicUpdatedAt:   updatedAt,
+			PrivateAddress:    event.PrivateIP.String(),
+			PrivatePort:       event.PrivatePort,
+			Protocol:          event.Protocol,
+			Logs:              logs,
+		})
+		r.emitKeepAlive(KeepAliveConnected, "udp", quicAddr, fmt.Sprintf("quic rtt %dms", nextLatency), nextLatency)
+		if changed {
+			r.runNotify(event)
+		}
 	}
 }
 
@@ -1025,20 +1039,18 @@ func (r *Runner) quicKeepAliveOnce(ctx context.Context, transport *quicKeepAlive
 		if ctx.Err() != nil {
 			return 0, errStopped
 		}
-		r.recordKeepAliveProbe(false)
 		return 0, fmt.Errorf("%w: udp quic keep-alive request: %v", errSessionClosed, err)
 	}
 	latency := transport.rttMilliseconds(time.Since(started))
-	r.recordKeepAliveProbe(true)
 	r.emitKeepAlive(KeepAliveConnected, "udp", remote, fmt.Sprintf("quic rtt %dms", latency), latency)
 	return latency, nil
 }
 
-func (r *Runner) reconnectQUICKeepAliveBeforeSTUN(ctx context.Context, conn net.PacketConn, network string, current ServerEndpoint) (ServerEndpoint, *net.UDPAddr, *quicKeepAliveTransport, error) {
+func (r *Runner) reconnectQUICKeepAliveBeforeSTUN(ctx context.Context, conn net.PacketConn, network string, current ServerEndpoint) (ServerEndpoint, *net.UDPAddr, *quicKeepAliveTransport, int64, error) {
 	attempt := 0
 	for {
 		if ctx.Err() != nil {
-			return ServerEndpoint{}, nil, nil, errStopped
+			return ServerEndpoint{}, nil, nil, 0, errStopped
 		}
 
 		r.emit(RuntimeStatus{
@@ -1055,19 +1067,16 @@ func (r *Runner) reconnectQUICKeepAliveBeforeSTUN(ctx context.Context, conn net.
 			}
 			nextTransport, latency, err := r.openQUICKeepAlive(ctx, conn, endpoint, addr, quicReconnectTimeout)
 			if err == nil {
-				r.recordKeepAliveProbe(true)
-				r.emitKeepAlive(KeepAliveConnected, "udp", addr, fmt.Sprintf("quic rtt %dms", latency), latency)
 				r.emit(RuntimeStatus{
-					State: StateRunning,
+					State: StateStarting,
 					Logs:  []LogEntry{{At: time.Now(), Level: "info", Message: "udp quic keep-alive reconnected; querying STUN for current public mapping"}},
 				})
-				return endpoint, addr, nextTransport, nil
+				return endpoint, addr, nextTransport, latency, nil
 			}
 			if ctx.Err() != nil {
-				return ServerEndpoint{}, nil, nil, errStopped
+				return ServerEndpoint{}, nil, nil, 0, errStopped
 			}
 			lastErr = err
-			r.recordKeepAliveProbe(false)
 		}
 		if lastErr == nil {
 			lastErr = errors.New("no udp quic keep-alive servers configured")
@@ -1084,7 +1093,7 @@ func (r *Runner) reconnectQUICKeepAliveBeforeSTUN(ctx context.Context, conn net.
 
 		select {
 		case <-ctx.Done():
-			return ServerEndpoint{}, nil, nil, errStopped
+			return ServerEndpoint{}, nil, nil, 0, errStopped
 		case <-time.After(1 * time.Second):
 		}
 	}
@@ -1178,9 +1187,15 @@ func (r *Runner) udpPublicProbe(ctx context.Context, network string, conn *net.U
 }
 
 func (r *Runner) confirmedUDPPublicProbe(ctx context.Context, network string, conn *net.UDPConn, responses <-chan stunResult, endpoints []ServerEndpoint) (stunResult, error) {
-	return r.confirmPublicProbe(ctx, len(endpoints), func() (stunResult, error) {
-		return r.udpPublicProbe(ctx, network, conn, responses, endpoints)
+	probeCtx, cancel := context.WithTimeout(ctx, udpPublicProbeTimeout)
+	defer cancel()
+	result, err := r.confirmPublicProbe(probeCtx, len(endpoints), func() (stunResult, error) {
+		return r.udpPublicProbe(probeCtx, network, conn, responses, endpoints)
 	})
+	if errors.Is(err, context.DeadlineExceeded) {
+		return stunResult{}, fmt.Errorf("udp public probe timeout after %s", udpPublicProbeTimeout)
+	}
+	return result, err
 }
 
 func (r *Runner) confirmPublicProbe(ctx context.Context, endpointCount int, probe func() (stunResult, error)) (stunResult, error) {
@@ -1268,13 +1283,13 @@ func (r *Runner) stunUDPShared(ctx context.Context, conn *net.UDPConn, addr *net
 		return stunResult{}, err
 	}
 
-	timeout := 3 * time.Second
-	retries := 10
+	timeout := udpSTUNResponseTimeout
+	retries := udpSTUNRetries
 	if runtime.GOOS == "windows" {
 		timeout = 100 * time.Millisecond
-		retries = 5
+		retries = udpSTUNRetries
 		if r.udpQueries == 0 {
-			retries = 50
+			retries = 30
 		}
 	}
 	r.udpQueries++
@@ -1596,52 +1611,19 @@ func (r *Runner) emitKeepAlive(state, protocol string, remote net.Addr, message 
 	}
 
 	now := time.Now()
-	lossPercent, probeCount, lostProbes := r.keepAliveLoss()
 	keep := KeepAlive{
-		State:       state,
-		Protocol:    protocol,
-		Address:     host,
-		Port:        port,
-		LatencyMs:   latencyMs,
-		LossPercent: lossPercent,
-		ProbeCount:  probeCount,
-		LostProbes:  lostProbes,
-		LastSeenAt:  now,
-		Message:     message,
+		State:      state,
+		Protocol:   protocol,
+		Address:    host,
+		Port:       port,
+		LatencyMs:  latencyMs,
+		LastSeenAt: now,
+		Message:    message,
 	}
 	if state == KeepAliveConnected {
 		keep.ConnectedAt = now
 	}
 	r.emit(RuntimeStatus{KeepAlive: keep})
-}
-
-func (r *Runner) recordKeepAliveProbe(ok bool) {
-	r.keepMu.Lock()
-	defer r.keepMu.Unlock()
-
-	const limit = 32
-	r.keepSamples = append(r.keepSamples, ok)
-	if len(r.keepSamples) > limit {
-		copy(r.keepSamples, r.keepSamples[len(r.keepSamples)-limit:])
-		r.keepSamples = r.keepSamples[:limit]
-	}
-}
-
-func (r *Runner) keepAliveLoss() (int, int, int) {
-	r.keepMu.Lock()
-	defer r.keepMu.Unlock()
-
-	total := len(r.keepSamples)
-	if total == 0 {
-		return 0, 0, 0
-	}
-	lost := 0
-	for _, ok := range r.keepSamples {
-		if !ok {
-			lost++
-		}
-	}
-	return int(float64(lost)/float64(total)*100 + 0.5), total, lost
 }
 
 func splitAddr(value string) (string, int) {

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>NATCat Console</title>
     <link rel="icon" type="image/png" href="/natcat-logo.png?v=20260607-cat-logo" />
-    <link rel="stylesheet" href="/styles.css?v=20260608-table-align7" />
+    <link rel="stylesheet" href="/styles.css?v=20260608-udp-probe-row" />
     <style>
       .instance-table .instance-row.table-head > .table-cell:nth-child(2),
       .instance-table .instance-row.table-head > .table-cell:nth-child(3),
@@ -281,10 +281,6 @@
                       <span>确认次数</span>
                       <input name="mappingConfirmations" type="number" min="1" max="20" />
                     </label>
-                    <label id="udpStunCycleField" class="field-card hidden">
-                      <span>STUN 周期</span>
-                      <input name="udpStunCycle" type="number" min="1" max="10000" />
-                    </label>
                   </div>
 
                   <div class="server-group-editor full-line">
@@ -458,6 +454,6 @@
       </div>
     </div>
 
-    <script src="/app.js?v=20260608-table-align7"></script>
+    <script src="/app.js?v=20260608-udp-keepalive-30s"></script>
   </body>
 </html>

@@ -53,14 +53,7 @@ func normalizeConfig(cfg *InstanceConfig) {
 		}
 	}
 	if cfg.KeepAliveSeconds <= 0 {
-		if cfg.Protocol == "udp" {
-			cfg.KeepAliveSeconds = 10
-		} else {
-			cfg.KeepAliveSeconds = 30
-		}
-	}
-	if cfg.UDPSTUNCycle <= 0 {
-		cfg.UDPSTUNCycle = 10
+		cfg.KeepAliveSeconds = 30
 	}
 	if cfg.MappingConfirmations <= 0 {
 		cfg.MappingConfirmations = defaultMappingConfirmations
@@ -88,9 +81,6 @@ func validateConfig(cfg InstanceConfig) error {
 	}
 	if cfg.HTTPPort < 0 || cfg.HTTPPort > 65535 {
 		return errors.New("httpPort must be 0-65535")
-	}
-	if cfg.UDPSTUNCycle <= 0 || cfg.UDPSTUNCycle > 10000 {
-		return errors.New("udpStunCycle must be 1-10000")
 	}
 	if cfg.MappingConfirmations <= 0 || cfg.MappingConfirmations > maxMappingConfirmations {
 		return errors.New("mappingConfirmations must be 1-20")
