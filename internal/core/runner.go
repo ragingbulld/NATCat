@@ -578,7 +578,6 @@ func (r *Runner) tcpKeepAlive(ctx context.Context, conn *net.TCPConn, endpoint S
 	keep := time.Duration(r.cfg.KeepAliveSeconds) * time.Second
 	interval := keep
 	reader := bufio.NewReader(conn)
-	missCount := 0
 
 	for {
 		if ctx.Err() != nil {
@@ -595,7 +594,7 @@ func (r *Runner) tcpKeepAlive(ctx context.Context, conn *net.TCPConn, endpoint S
 			return fmt.Errorf("%w: tcp keep-alive write: %v", errSessionClosed, err)
 		}
 
-		if err := conn.SetReadDeadline(time.Now().Add(tcpKeepAliveResponseTimeout(keep))); err != nil {
+		if err := conn.SetReadDeadline(time.Now().Add(tcpKeepAliveRequestTimeout)); err != nil {
 			r.recordKeepAliveProbe(false)
 			return fmt.Errorf("%w: tcp keep-alive read deadline: %v", errSessionClosed, err)
 		}
@@ -603,11 +602,6 @@ func (r *Runner) tcpKeepAlive(ctx context.Context, conn *net.TCPConn, endpoint S
 		if err != nil {
 			if ctx.Err() != nil {
 				return errStopped
-			}
-			if ne, ok := err.(net.Error); ok && ne.Timeout() && missCount == 0 {
-				missCount++
-				r.recordKeepAliveProbe(false)
-				continue
 			}
 			r.recordKeepAliveProbe(false)
 			if errors.Is(err, io.EOF) {
@@ -628,7 +622,6 @@ func (r *Runner) tcpKeepAlive(ctx context.Context, conn *net.TCPConn, endpoint S
 		lastLatency = latency
 		r.recordKeepAliveProbe(true)
 		r.emitKeepAlive(KeepAliveConnected, "tcp", conn.RemoteAddr(), fmt.Sprintf("tcp rtt %dms", latency), latency)
-		missCount = 0
 		if err := r.waitTCPKeepAliveInterval(ctx, conn, reader, interval); err != nil {
 			if !errors.Is(err, errStopped) {
 				r.recordKeepAliveProbe(false)
@@ -636,13 +629,6 @@ func (r *Runner) tcpKeepAlive(ctx context.Context, conn *net.TCPConn, endpoint S
 			return err
 		}
 	}
-}
-
-func tcpKeepAliveResponseTimeout(keep time.Duration) time.Duration {
-	if keep <= 0 {
-		return tcpKeepAliveRequestTimeout
-	}
-	return keep
 }
 
 func (r *Runner) waitTCPKeepAliveInterval(ctx context.Context, conn *net.TCPConn, reader *bufio.Reader, interval time.Duration) error {
