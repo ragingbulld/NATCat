@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NATCat Console</title>
+    <link rel="icon" type="image/png" href="/natcat-logo.png?v=20260607-cat-logo" />
+    <link rel="stylesheet" href="/styles.css?v=20260608-table-align7" />
+    <style>
+      .instance-table .instance-row.table-head > .table-cell:nth-child(2),
+      .instance-table .instance-row.table-head > .table-cell:nth-child(3),
+      .instance-table .instance-row.table-head > .table-cell:nth-child(4),
+      .instance-table .instance-row.table-head > .table-cell:nth-child(5),
+      .instance-table .instance-row.table-head > .table-cell:nth-child(6) {
+        justify-content: center;
+        padding-left: 0;
+        padding-right: 0;
+      }
+      .instance-table .instance-row.table-head > .table-cell:nth-child(2) {
+        transform: translateX(-6px);
+      }
+      .instance-table .instance-row.table-head > .table-cell:nth-child(4) {
+        transform: translateX(-18px);
+      }
+      .instance-table .instance-row.table-head > .table-cell:nth-child(6) {
+        transform: translateX(-14px);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="login" class="login-shell hidden">
+      <section class="login-panel">
+        <div class="login-brand">
+          <div class="login-brand-top">
+            <div class="login-logo"><img src="/natcat-logo.png?v=20260607-cat-logo" alt="NATCat" /></div>
+            <span>PRIVATE CONSOLE</span>
+          </div>
+          <div class="login-brand-copy">
+            <h1>NATCat</h1>
+            <p>NAT Mapping Console</p>
+          </div>
+          <div class="login-metrics" aria-hidden="true">
+            <span><b>TCP</b><small>HTTP</small></span>
+            <span><b>UDP</b><small>QUIC</small></span>
+            <span><b>STUN</b><small>PROBE</small></span>
+          </div>
+        </div>
+        <form id="loginForm" class="login-form">
+          <div class="login-form-head">
+            <span>AUTH</span>
+            <h2>控制台登录</h2>
+          </div>
+          <label class="login-field">
+            <span>用户名</span>
+            <input name="username" autocomplete="username" value="admin" />
+          </label>
+          <label class="login-field">
+            <span>密码</span>
+            <input name="password" type="password" autocomplete="current-password" />
+          </label>
+          <button class="primary wide" type="submit">登录</button>
+          <div id="loginError" class="form-error"></div>
+        </form>
+      </section>
+    </div>
+
+    <div id="app" class="console-shell hidden">
+      <header class="global-header">
+        <div class="product-block">
+          <div class="brand-mark light"><img src="/natcat-logo.png?v=20260607-cat-logo" alt="NATCat" /></div>
+          <div>
+            <div class="brand-name">NATCat</div>
+            <div class="brand-subtitle">资源控制台</div>
+          </div>
+        </div>
+
+        <div class="account-card">
+          <div class="account-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path d="M12 12.4a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"></path>
+              <path d="M5.2 20a6.8 6.8 0 0 1 13.6 0"></path>
+            </svg>
+          </div>
+          <div>
+            <div class="account-name">管理员</div>
+          </div>
+          <button id="logoutBtn" class="ghost small" type="button">退出</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="list-panel">
+          <div class="list-head">
+            <div>
+              <h1>实例列表</h1>
+              <p id="pageSummary">0 个实例</p>
+            </div>
+            <div class="page-actions">
+              <button id="refreshBtn" class="ghost" type="button">刷新</button>
+              <button id="newBtn" class="primary create-button" type="button">
+                <span class="button-icon">+</span>
+                创建实例
+              </button>
+            </div>
+          </div>
+
+          <div id="pageError" class="page-error"></div>
+
+          <div class="list-toolbar">
+            <label class="search-field">
+              <span>⌕</span>
+              <input id="searchInput" placeholder="搜索实例、协议、保活目标" />
+            </label>
+            <div class="filter-tabs" role="tablist" aria-label="状态筛选">
+              <button class="filter-tab active" data-filter="all" type="button">全部</button>
+              <button class="filter-tab" data-filter="running" type="button">运行中</button>
+              <button class="filter-tab" data-filter="stopped" type="button">已停止</button>
+              <button class="filter-tab" data-filter="pending" type="button">待启动</button>
+            </div>
+          </div>
+
+          <div id="instanceList" class="instance-table-shell"></div>
+        </section>
+      </main>
+
+      <div id="configModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <div class="modal-backdrop" data-close-modal></div>
+        <section class="modal-panel">
+          <div class="modal-head">
+            <div class="modal-title-block">
+              <div id="modalMark" class="modal-mark line-mark" aria-hidden="true"></div>
+              <div>
+                <h2 id="modalTitle">实例配置</h2>
+                <p>NATCat Mapping</p>
+              </div>
+            </div>
+            <button id="modalCloseBtn" class="ghost small" type="button">关闭</button>
+          </div>
+
+          <form id="configForm" class="config-form">
+            <input name="id" type="hidden" />
+
+            <div class="form-layout">
+              <aside class="form-nav" aria-label="配置分区">
+                <a href="#section-basic" class="form-nav-item active">
+                  <span class="nav-dot"></span>
+                  <span>
+                    <b>基础</b>
+                    <small>CORE</small>
+                  </span>
+                </a>
+                <a href="#section-probe" class="form-nav-item">
+                  <span class="nav-dot"></span>
+                  <span>
+                    <b>保活</b>
+                    <small>KEEPALIVE</small>
+                  </span>
+                </a>
+                <a href="#section-route" class="form-nav-item">
+                  <span class="nav-dot"></span>
+                  <span>
+                    <b>路由与通知</b>
+                    <small>HOOK</small>
+                  </span>
+                </a>
+              </aside>
+
+              <div class="form-scroll">
+                <div id="section-basic" class="form-section">
+                  <div class="form-section-head">
+                    <div>
+                      <div class="form-section-title">基础</div>
+                      <p>CORE</p>
+                    </div>
+                    <label class="switch-line">
+                      <input name="enabled" type="checkbox" />
+                      <span>自动启动</span>
+                    </label>
+                  </div>
+
+                  <label class="field-card full-line">
+                    <span>名称</span>
+                    <input name="name" placeholder="Home NAS" />
+                  </label>
+
+                  <div class="form-row split basic-row">
+                    <label class="field-card protocol-field">
+                      <span>协议</span>
+                      <input name="protocol" type="hidden" value="tcp" />
+                      <div class="segmented-control" role="group" aria-label="协议">
+                        <button class="segment active" data-protocol="tcp" type="button">TCP</button>
+                        <button class="segment" data-protocol="udp" type="button">UDP</button>
+                      </div>
+                    </label>
+                    <label id="keepAliveSecondsField" class="field-card">
+                      <span>绑定端口</span>
+                      <input name="bindPort" placeholder="0, 500, 30000-30100" />
+                    </label>
+                  </div>
+
+                </div>
+
+                <div id="section-probe" class="form-section">
+                  <div class="form-section-head">
+                    <div>
+                      <div class="form-section-title">保活链路</div>
+                      <p>KEEPALIVE</p>
+                    </div>
+                  </div>
+
+                  <div class="server-source-grid">
+                    <section class="source-card">
+                      <div class="source-head">
+                        <div>
+                          <b>STUN</b>
+                          <small>PUBLIC PROBE</small>
+                        </div>
+                        <input name="stunMode" type="hidden" value="custom" />
+                        <div class="segmented-control source-control" role="group" aria-label="STUN 来源">
+                          <button class="segment active" data-source-field="stunMode" data-source-value="custom" type="button">自定义</button>
+                          <button class="segment" data-source-field="stunMode" data-source-value="group" type="button">STUN 组</button>
+                        </div>
+                      </div>
+
+                      <div id="stunCustomFields" class="form-row source-fields">
+                        <label class="field-card">
+                          <span>STUN 主机</span>
+                          <input name="stunHost" placeholder="turn.cloudflare.com" />
+                        </label>
+                        <label class="field-card">
+                          <span>STUN 端口</span>
+                          <input name="stunPort" type="number" min="1" max="65535" placeholder="3478" />
+                        </label>
+                      </div>
+
+                      <div id="stunGroupFields" class="server-list-hint full-line hidden">
+                        <input name="stunGroupId" type="hidden" value="stun" />
+                        <span class="list-hint-title">使用 STUN 组</span>
+                        <small>按下方 STUN 列表顺序探测公网地址</small>
+                      </div>
+                    </section>
+
+                    <section class="source-card">
+                      <div class="source-head">
+                        <div>
+                          <b>KEEPALIVE</b>
+                          <small id="keepAliveSourceLabel">HTTP 组</small>
+                        </div>
+                        <input name="keepAliveMode" type="hidden" value="custom" />
+                        <div class="segmented-control source-control" role="group" aria-label="保活来源">
+                          <button class="segment active" data-source-field="keepAliveMode" data-source-value="custom" type="button">自定义</button>
+                          <button id="keepAliveGroupButton" class="segment" data-source-field="keepAliveMode" data-source-value="group" type="button">HTTP 组</button>
+                        </div>
+                      </div>
+
+                      <div id="httpFields" class="form-row source-fields">
+                        <label class="field-card">
+                          <span id="httpHostLabel">HTTP 主机</span>
+                          <input name="httpHost" placeholder="223.5.5.5" />
+                        </label>
+                        <label class="field-card">
+                          <span id="httpPortLabel">HTTP 端口</span>
+                          <input name="httpPort" type="number" min="1" max="65535" />
+                        </label>
+                      </div>
+
+                      <div id="keepAliveGroupFields" class="server-list-hint full-line hidden">
+                        <input name="keepAliveGroupId" type="hidden" value="http" />
+                        <span id="keepAliveGroupTitle" class="list-hint-title">使用 HTTP 组</span>
+                        <small id="keepAliveGroupHint">TCP 使用 HTTP 组</small>
+                      </div>
+                    </section>
+                  </div>
+
+                  <div id="probeTimingRow" class="form-row probe-timing-row">
+                    <label class="field-card">
+                      <span>保活间隔</span>
+                      <input name="keepAliveSeconds" type="number" min="1" />
+                    </label>
+                    <label class="field-card">
+                      <span>确认次数</span>
+                      <input name="mappingConfirmations" type="number" min="1" max="20" />
+                    </label>
+                    <label id="udpStunCycleField" class="field-card hidden">
+                      <span>STUN 周期</span>
+                      <input name="udpStunCycle" type="number" min="1" max="10000" />
+                    </label>
+                  </div>
+
+                  <div class="server-group-editor full-line">
+                    <div class="group-editor-head">
+                      <div class="group-title-block">
+                        <span class="group-head-mark" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                            <rect x="3" y="4.5" width="18" height="5" rx="1.8"></rect>
+                            <rect x="3" y="14.5" width="18" height="5" rx="1.8"></rect>
+                            <circle cx="7.5" cy="7" r="0.9"></circle>
+                            <circle cx="7.5" cy="17" r="0.9"></circle>
+                            <path d="M11 7h7"></path>
+                            <path d="M11 17h7"></path>
+                          </svg>
+                        </span>
+                        <span>
+                          <b>服务器组</b>
+                          <small>STUN / HTTP / QUIC，每行一个地址:端口</small>
+                        </span>
+                      </div>
+                    </div>
+                    <div class="server-list-grid">
+                      <label class="server-list-card stun-list">
+                        <span class="server-card-head">
+                          <span class="server-card-title"><span class="server-card-dot"></span>STUN 组</span>
+                          <span class="server-card-tag">PROBE</span>
+                        </span>
+                        <span class="server-editor-shell">
+                          <span class="server-editor-rail" aria-hidden="true"></span>
+                          <textarea name="stunServersText" spellcheck="false" wrap="off" placeholder="stun.miwifi.com:3478&#10;stun.cloudflare.com:3478"></textarea>
+                        </span>
+                        <span class="server-card-foot">
+                          <span>公网地址探测</span>
+                          <span>STUN</span>
+                        </span>
+                      </label>
+                      <label class="server-list-card http-list">
+                        <span class="server-card-head">
+                          <span class="server-card-title"><span class="server-card-dot"></span>HTTP 组</span>
+                          <span class="server-card-tag">TCP</span>
+                        </span>
+                        <span class="server-editor-shell">
+                          <span class="server-editor-rail" aria-hidden="true"></span>
+                          <textarea name="httpServersText" spellcheck="false" wrap="off" placeholder="qq.com:80&#10;223.5.5.5:80"></textarea>
+                        </span>
+                        <span class="server-card-foot">
+                          <span>TCP 保活链路</span>
+                          <span>HTTP</span>
+                        </span>
+                      </label>
+                      <label class="server-list-card quic-list">
+                        <span class="server-card-head">
+                          <span class="server-card-title"><span class="server-card-dot"></span>QUIC 组</span>
+                          <span class="server-card-tag">UDP</span>
+                        </span>
+                        <span class="server-editor-shell">
+                          <span class="server-editor-rail" aria-hidden="true"></span>
+                          <textarea name="quicServersText" spellcheck="false" wrap="off" placeholder="zhuanlan.zhihu.com:443"></textarea>
+                        </span>
+                        <span class="server-card-foot">
+                          <span>UDP HTTP/3 保活</span>
+                          <span>QUIC</span>
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="section-route" class="form-section">
+                  <div class="form-section-head">
+                    <div>
+                      <div class="form-section-title">路由与通知</div>
+                      <p>HOOK</p>
+                    </div>
+                  </div>
+                  <div class="form-row">
+                    <label class="field-card">
+                      <span>接口</span>
+                      <input name="interface" placeholder="eth0" />
+                    </label>
+                    <label class="field-card">
+                      <span>FWMark</span>
+                      <input name="fwMark" type="number" min="0" />
+                    </label>
+                  </div>
+
+                  <div class="field-card full-line notify-card">
+                    <span class="notify-card-head">
+                      <span>
+                        <b>通知脚本</b>
+                        <small>变量会在运行前替换成当前公网值</small>
+                      </span>
+                      <button id="notifyTestBtn" class="notify-test-button" type="button">
+                        <span class="notify-test-icon" aria-hidden="true"></span>
+                        运行测试
+                      </button>
+                    </span>
+                    <textarea
+                      class="notify-script-editor"
+                      name="notifyScript"
+                      spellcheck="false"></textarea>
+                    <span class="field-help">映射变化时执行。公网变量会在运行前替换成具体值，也可填一个已有脚本路径。</span>
+                    <span class="script-vars" aria-label="通知脚本变量">
+                      <button type="button" data-script-var="$NATCAT_PUBLIC_IP">公网 IP</button>
+                      <button type="button" data-script-var="$NATCAT_PUBLIC_PORT">公网端口</button>
+                      <button type="button" data-script-var="$NATCAT_PUBLIC_ENDPOINT">公网地址</button>
+                    </span>
+                    <div id="notifyTestPanel" class="notify-test-panel hidden">
+                      <div class="notify-test-panel-head">
+                        <span id="notifyTestStatus" class="notify-test-status">待运行</span>
+                        <span id="notifyTestMeta" class="notify-test-meta"></span>
+                      </div>
+                      <pre id="notifyTestOutput" class="notify-test-output"></pre>
+                    </div>
+                  </div>
+
+                  <div id="formError" class="form-error"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-actions">
+              <button id="deleteConfigBtn" class="danger hidden" type="button">删除</button>
+              <span class="form-spacer"></span>
+              <button id="modalCancelBtn" class="ghost" type="button">取消</button>
+              <button class="primary" type="submit">保存</button>
+            </div>
+          </form>
+        </section>
+      </div>
+
+      <div id="logModal" class="modal log-modal hidden" role="dialog" aria-modal="true" aria-labelledby="logTitle">
+        <div class="modal-backdrop" data-close-log-modal></div>
+        <section class="modal-panel log-panel">
+          <div class="modal-head log-head">
+            <div class="modal-title-block">
+              <div class="modal-mark log-mark line-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M7 7h10"></path>
+                  <path d="M7 12h10"></path>
+                  <path d="M7 17h6"></path>
+                  <path d="M4 4.5A2.5 2.5 0 0 1 6.5 2h11A2.5 2.5 0 0 1 20 4.5v15A2.5 2.5 0 0 1 17.5 22h-11A2.5 2.5 0 0 1 4 19.5Z"></path>
+                </svg>
+              </div>
+              <div>
+                <h2 id="logTitle">实例日志</h2>
+                <p id="logSubtitle">0 条记录</p>
+              </div>
+            </div>
+            <button id="logCloseBtn" class="ghost small" type="button">关闭</button>
+          </div>
+          <div id="logList" class="log-list"></div>
+        </section>
+      </div>
+
+      <div id="confirmModal" class="modal confirm-modal hidden" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+        <div class="modal-backdrop" data-confirm-action="cancel"></div>
+        <section class="confirm-panel">
+          <div class="confirm-mark" aria-hidden="true">
+            <span></span>
+          </div>
+          <div class="confirm-copy">
+            <h2 id="confirmTitle">确认操作</h2>
+            <p id="confirmMessage">请确认是否继续。</p>
+          </div>
+          <div class="confirm-actions">
+            <button id="confirmCancelBtn" class="confirm-cancel" type="button">取消</button>
+            <button id="confirmOkBtn" class="confirm-ok" type="button">确认</button>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <script src="/app.js?v=20260608-table-align7"></script>
+  </body>
+</html>

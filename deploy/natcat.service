@@ -1,0 +1,17 @@
+[Unit]
+Description=NATCat WebUI and NAT mapping service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/natcat
+ExecStart=/opt/natcat/natcat --listen 0.0.0.0:8080 --data /var/lib/natcat/data.json
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

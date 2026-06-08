@@ -1,0 +1,12 @@
+/bin/
+/.runtime/
+/dist/
+/natcat
+/natcat.exe
+/*.png
+*.exe
+*.log
+*.tmp
+natcat.json
+data.json
+*.local.json
