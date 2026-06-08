@@ -24,7 +24,6 @@ const el = {
   loginError: document.querySelector("#loginError"),
   logoutBtn: document.querySelector("#logoutBtn"),
   newBtn: document.querySelector("#newBtn"),
-  refreshBtn: document.querySelector("#refreshBtn"),
   instanceList: document.querySelector("#instanceList"),
   searchInput: document.querySelector("#searchInput"),
   filterTabs: document.querySelectorAll(".filter-tab"),
@@ -184,19 +183,6 @@ function renderSummary() {
     notes.push(`${errors} 个异常`);
   }
   el.pageSummary.textContent = notes.join(" / ");
-}
-
-async function refreshLive() {
-  clearPageError();
-  const originalText = el.refreshBtn.textContent;
-  el.refreshBtn.disabled = true;
-  el.refreshBtn.textContent = "刷新中";
-  try {
-    await loadInstances();
-  } finally {
-    el.refreshBtn.disabled = false;
-    el.refreshBtn.textContent = originalText;
-  }
 }
 
 function renderList() {
@@ -486,7 +472,7 @@ function createTCPCheckCard(item, check) {
 
   const meta = document.createElement("span");
   meta.className = "check-meta";
-  meta.textContent = validTime(check?.checkedAt) ? absoluteTimeText(check.checkedAt) : "未检测";
+  meta.textContent = validTime(check?.checkedAt) ? absoluteTimeText(check.checkedAt) : "-";
 
   card.append(main, refresh, meta);
   return card;
@@ -645,12 +631,31 @@ function clearInitialCheckKeys(id) {
   }
 }
 
+function lockPageScroll() {
+  const scrollbarWidth = Math.max(0, window.innerWidth - document.documentElement.clientWidth);
+  if (scrollbarWidth > 0) {
+    document.body.style.paddingRight = `${scrollbarWidth}px`;
+  }
+  document.body.classList.add("modal-open");
+}
+
+function unlockPageScrollIfIdle() {
+  const formOpen = el.modal && !el.modal.classList.contains("hidden");
+  const logOpen = el.logModal && !el.logModal.classList.contains("hidden");
+  const confirmOpen = el.confirmModal && !el.confirmModal.classList.contains("hidden");
+  if (formOpen || logOpen || confirmOpen) {
+    return;
+  }
+  document.body.classList.remove("modal-open");
+  document.body.style.paddingRight = "";
+}
+
 function openLogModal(item) {
   closeModal();
   state.activeLogInstanceId = item?.config?.id || "";
   renderLogModal(item);
   el.logModal.classList.remove("hidden");
-  document.body.classList.add("modal-open");
+  lockPageScroll();
 }
 
 function refreshOpenLogModal() {
@@ -666,9 +671,7 @@ function refreshOpenLogModal() {
 function closeLogModal() {
   state.activeLogInstanceId = "";
   el.logModal?.classList.add("hidden");
-  if (el.modal?.classList.contains("hidden")) {
-    document.body.classList.remove("modal-open");
-  }
+  unlockPageScrollIfIdle();
 }
 
 function renderLogModal(item) {
@@ -796,7 +799,7 @@ function confirmAction(options = {}) {
     el.confirmCancelBtn.textContent = options.cancelText || "取消";
   }
   el.confirmModal.classList.remove("hidden");
-  document.body.classList.add("modal-open");
+  lockPageScroll();
 
   return new Promise((resolve) => {
     let settled = false;
@@ -807,9 +810,7 @@ function confirmAction(options = {}) {
       settled = true;
       cleanup();
       el.confirmModal.classList.add("hidden");
-      if (el.modal.classList.contains("hidden") && (!el.logModal || el.logModal.classList.contains("hidden"))) {
-        document.body.classList.remove("modal-open");
-      }
+      unlockPageScrollIfIdle();
       resolve(value);
     };
     const onKey = (event) => {
@@ -854,7 +855,7 @@ function openModal(cfg) {
   resetNotifyTestPanel();
   el.deleteConfigBtn.classList.toggle("hidden", !cfg.id);
   el.modal.classList.remove("hidden");
-  document.body.classList.add("modal-open");
+  lockPageScroll();
   el.formScroll?.scrollTo({ top: 0 });
   setActiveFormNav("section-basic");
   requestAnimationFrame(syncServerEditorLineNumbers);
@@ -863,7 +864,7 @@ function openModal(cfg) {
 
 function closeModal() {
   el.modal?.classList.add("hidden");
-  document.body.classList.remove("modal-open");
+  unlockPageScrollIfIdle();
   el.formError.textContent = "";
   state.serverGroupsDirty = false;
   populateServerGroupControls();
@@ -1528,10 +1529,6 @@ el.logoutBtn.addEventListener("click", async () => {
 });
 
 el.newBtn.addEventListener("click", openNewModal);
-
-el.refreshBtn.addEventListener("click", () => {
-  refreshLive().catch(showPageError);
-});
 
 el.searchInput.addEventListener("input", () => {
   state.search = el.searchInput.value;

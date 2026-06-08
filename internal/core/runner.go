@@ -767,6 +767,16 @@ func (r *Runner) runUDP(ctx context.Context) error {
 		quicAddr = nextAddr
 		quicTransport = nextTransport
 
+		if err := waitMinimumReconnectVisible(ctx, reconnectingAt); err != nil {
+			_ = quicTransport.Close()
+			return err
+		}
+		r.emitKeepAlive(KeepAliveConnected, "udp", quicAddr, fmt.Sprintf("quic rtt %dms", nextLatency), nextLatency)
+		r.emit(RuntimeStatus{
+			State: StateRunning,
+			Logs:  []LogEntry{{At: time.Now(), Level: "info", Message: "udp quic keep-alive reconnected; probing public mapping"}},
+		})
+
 		result, err := r.confirmedUDPPublicProbe(ctx, network, conn, sharedConn.stunResponses, stunServers(r.cfg))
 		if err != nil {
 			_ = quicTransport.Close()
@@ -778,10 +788,6 @@ func (r *Runner) runUDP(ctx context.Context) error {
 				}},
 			})
 			return fmt.Errorf("%w: udp public probe after quic reconnect failed: %v", errSessionClosed, err)
-		}
-		if err := waitMinimumReconnectVisible(ctx, reconnectingAt); err != nil {
-			_ = quicTransport.Close()
-			return err
 		}
 		event = mappingEvent{
 			PublicIP:    result.IP,
@@ -815,7 +821,6 @@ func (r *Runner) runUDP(ctx context.Context) error {
 			Protocol:          event.Protocol,
 			Logs:              logs,
 		})
-		r.emitKeepAlive(KeepAliveConnected, "udp", quicAddr, fmt.Sprintf("quic rtt %dms", nextLatency), nextLatency)
 		if changed {
 			r.runNotify(event)
 		}
