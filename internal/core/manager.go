@@ -308,6 +308,7 @@ func (m *Manager) report(id string, update RuntimeStatus) {
 			next.Protocol == current.KeepAlive.Protocol &&
 			next.Address == current.KeepAlive.Address &&
 			next.Port == current.KeepAlive.Port &&
+			keepAliveConnectedAtBelongsToRun(current) &&
 			!current.KeepAlive.ConnectedAt.IsZero() {
 			next.ConnectedAt = current.KeepAlive.ConnectedAt
 		}
@@ -350,6 +351,9 @@ func (m *Manager) setStatusLocked(id, state, message string, err error) {
 	st := m.statusForLocked(id)
 	st.State = state
 	st.LastChange = time.Now()
+	if state == StateStarting || state == StateStopping || state == StateStopped {
+		st.KeepAlive = KeepAlive{}
+	}
 	if err != nil {
 		st.LastError = err.Error()
 		st.Logs = append(st.Logs, LogEntry{At: time.Now(), Level: "error", Message: err.Error()})
@@ -362,6 +366,13 @@ func (m *Manager) setStatusLocked(id, state, message string, err error) {
 	}
 	m.status[id] = st
 	m.notifyStatusLocked(id, st)
+}
+
+func keepAliveConnectedAtBelongsToRun(st RuntimeStatus) bool {
+	if st.StartedAt == nil {
+		return true
+	}
+	return !st.KeepAlive.ConnectedAt.Before(*st.StartedAt)
 }
 
 func (m *Manager) notifyStatusLocked(id string, st RuntimeStatus) {
