@@ -97,14 +97,15 @@ type PortCheck struct {
 }
 
 type KeepAlive struct {
-	State       string    `json:"state"`
-	Protocol    string    `json:"protocol"`
-	Address     string    `json:"address"`
-	Port        int       `json:"port"`
-	LatencyMs   int64     `json:"latencyMs,omitempty"`
-	ConnectedAt time.Time `json:"connectedAt,omitempty"`
-	LastSeenAt  time.Time `json:"lastSeenAt,omitempty"`
-	Message     string    `json:"message"`
+	State            string    `json:"state"`
+	Protocol         string    `json:"protocol"`
+	Address          string    `json:"address"`
+	Port             int       `json:"port"`
+	LatencyMs        int64     `json:"latencyMs,omitempty"`
+	ConnectedAt      time.Time `json:"connectedAt,omitempty"`
+	ConnectedSeconds int64     `json:"connectedSeconds"`
+	LastSeenAt       time.Time `json:"lastSeenAt,omitempty"`
+	Message          string    `json:"message"`
 }
 
 type LogEntry struct {

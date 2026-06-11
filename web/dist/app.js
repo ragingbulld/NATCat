@@ -9,7 +9,6 @@ const state = {
   serverGroupsDirty: false,
   poller: null,
   checkPoller: null,
-  clockTicker: null,
   eventSource: null,
   checkRunInFlight: false,
   filter: "all",
@@ -89,7 +88,7 @@ function emptyConfig() {
     httpHost: "qq.com",
     httpPort: 80,
     interface: "",
-    keepAliveSeconds: 30,
+    keepAliveSeconds: 5,
     mappingConfirmations: 2,
     notifyScript: "",
     fwMark: 0,
@@ -135,7 +134,6 @@ function showLogin() {
     clearInterval(state.checkPoller);
     state.checkPoller = null;
   }
-  stopClockTicker();
   closeEventStream();
 }
 
@@ -148,39 +146,7 @@ function showApp() {
   if (!state.checkPoller) {
     state.checkPoller = setInterval(() => runVisibleTCPChecks().catch(() => {}), 30000);
   }
-  startClockTicker();
   connectEventStream();
-}
-
-function startClockTicker() {
-  if (state.clockTicker) {
-    return;
-  }
-  scheduleClockTicker(1000);
-}
-
-function stopClockTicker() {
-  if (!state.clockTicker) {
-    return;
-  }
-  clearTimeout(state.clockTicker);
-  state.clockTicker = null;
-}
-
-function scheduleClockTicker(delay) {
-  state.clockTicker = setTimeout(() => {
-    state.clockTicker = null;
-    scheduleClockTicker(refreshKeepAliveAges());
-  }, delay);
-}
-
-function resetClockTicker(delay) {
-  if (!state.clockTicker) {
-    return;
-  }
-  clearTimeout(state.clockTicker);
-  state.clockTicker = null;
-  scheduleClockTicker(delay);
 }
 
 async function boot() {
@@ -222,6 +188,13 @@ function connectEventStream() {
       loadInstances().catch(() => {});
     }
   });
+  source.addEventListener("keepalive-age", (event) => {
+    try {
+      applyKeepAliveAgeEvent(JSON.parse(event.data));
+    } catch (_) {
+      loadInstances().catch(() => {});
+    }
+  });
   source.addEventListener("error", () => {
     if (state.eventSource !== source) {
       return;
@@ -253,10 +226,40 @@ function applyRuntimeEvent(event) {
   render();
 }
 
+function applyKeepAliveAgeEvent(items) {
+  if (!Array.isArray(items)) {
+    return;
+  }
+  let changed = false;
+  for (const update of items) {
+    const index = state.instances.findIndex((item) => item.config.id === update?.id);
+    if (index < 0 || !state.instances[index].runtime?.keepAlive) {
+      continue;
+    }
+    const seconds = Number(update.connectedSeconds);
+    if (!Number.isFinite(seconds) || seconds < 0) {
+      continue;
+    }
+    state.instances[index] = {
+      ...state.instances[index],
+      runtime: {
+        ...state.instances[index].runtime,
+        keepAlive: {
+          ...state.instances[index].runtime.keepAlive,
+          connectedSeconds: seconds,
+        },
+      },
+    };
+    changed = true;
+  }
+  if (changed) {
+    render();
+  }
+}
+
 function render() {
   renderSummary();
   renderList();
-  resetClockTicker(refreshKeepAliveAges());
   refreshOpenLogModal();
 }
 
@@ -515,7 +518,6 @@ function createKeepAliveCard(cfg, keep) {
   if (age) {
     const agePill = document.createElement("span");
     agePill.className = "keepalive-metric age";
-    agePill.dataset.connectedAt = keep.connectedAt || "";
     agePill.textContent = age;
     metrics.append(agePill);
   }
@@ -523,23 +525,6 @@ function createKeepAliveCard(cfg, keep) {
   card.append(top, bottom);
 
   return card;
-}
-
-function refreshKeepAliveAges() {
-  const now = Date.now();
-  let nextDelay = 1000;
-  document.querySelectorAll(".keepalive-metric.age[data-connected-at]").forEach((item) => {
-    const connectedAt = new Date(item.dataset.connectedAt).getTime();
-    if (Number.isNaN(connectedAt)) {
-      return;
-    }
-    const elapsedMs = Math.max(0, now - connectedAt);
-    const seconds = Math.floor(elapsedMs / 1000);
-    item.textContent = formatShortDuration(seconds);
-    const untilNextSecond = 1000 - (elapsedMs % 1000);
-    nextDelay = Math.min(nextDelay, untilNextSecond <= 20 ? 50 : untilNextSecond + 20);
-  });
-  return Math.max(50, Math.min(1000, Math.ceil(nextDelay)));
 }
 
 function createTCPCheckCard(item, check) {
@@ -1030,10 +1015,10 @@ function keepAliveAge(keep) {
   if (!keep || keep.state !== "connected") {
     return "";
   }
-  if (!validTime(keep.connectedAt)) {
+  if (!Number.isFinite(keep.connectedSeconds)) {
     return "";
   }
-  return formatShortDuration(secondsSince(keep.connectedAt));
+  return formatShortDuration(Math.max(0, Math.floor(keep.connectedSeconds)));
 }
 
 function keepAliveMeta(keep) {
@@ -1063,14 +1048,6 @@ function formatShortDuration(totalSeconds) {
     return `${hours}h`;
   }
   return `${Math.floor(hours / 24)}d`;
-}
-
-function secondsSince(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return 0;
-  }
-  return Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
 }
 
 function instanceInitials(value) {
@@ -1112,7 +1089,7 @@ function fillForm(cfg) {
   f.httpHost.value = cfg.httpHost || "";
   f.httpPort.value = cfg.httpPort || ((cfg.protocol || "tcp") === "udp" ? 443 : 80);
   f.interface.value = cfg.interface || "";
-  f.keepAliveSeconds.value = cfg.keepAliveSeconds || 30;
+  f.keepAliveSeconds.value = cfg.keepAliveSeconds || 5;
   f.mappingConfirmations.value = cfg.mappingConfirmations || 2;
   f.notifyScript.value = cfg.notifyScript || "";
   f.fwMark.value = cfg.fwMark || 0;
@@ -1139,7 +1116,7 @@ function readForm() {
     httpHost: f.httpHost.value.trim(),
     httpPort: numberValue(f.httpPort.value, f.protocol.value === "udp" ? 443 : 80),
     interface: f.interface.value.trim(),
-    keepAliveSeconds: numberValue(f.keepAliveSeconds.value, 30),
+    keepAliveSeconds: numberValue(f.keepAliveSeconds.value, 5),
     mappingConfirmations: numberValue(f.mappingConfirmations.value, 2),
     notifyScript: f.notifyScript.value.trim(),
     fwMark: numberValue(f.fwMark.value, 0),
@@ -1488,7 +1465,7 @@ function setProtocol(protocol) {
       el.form.elements.httpHost.value = "qq.com";
     }
     if (!el.form.elements.keepAliveSeconds.value.trim()) {
-      el.form.elements.keepAliveSeconds.value = "30";
+      el.form.elements.keepAliveSeconds.value = "5";
     }
   }
 }

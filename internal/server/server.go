@@ -107,6 +107,9 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ageTicker := time.NewTicker(200 * time.Millisecond)
+	defer ageTicker.Stop()
+	lastAges := map[string]int64{}
 	heartbeat := time.NewTicker(20 * time.Second)
 	defer heartbeat.Stop()
 
@@ -118,6 +121,11 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			if !ok || !writeSSE(w, flusher, "runtime", event) {
 				return
 			}
+		case <-ageTicker.C:
+			ages := changedKeepAliveAges(lastAges, s.manager.KeepAliveAges())
+			if len(ages) > 0 && !writeSSE(w, flusher, "keepalive-age", ages) {
+				return
+			}
 		case <-heartbeat.C:
 			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
 				return
@@ -125,6 +133,25 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+func changedKeepAliveAges(last map[string]int64, current []core.KeepAliveAgeEvent) []core.KeepAliveAgeEvent {
+	seen := make(map[string]struct{}, len(current))
+	changed := make([]core.KeepAliveAgeEvent, 0, len(current))
+	for _, age := range current {
+		seen[age.ID] = struct{}{}
+		if previous, ok := last[age.ID]; ok && previous == age.ConnectedSeconds {
+			continue
+		}
+		last[age.ID] = age.ConnectedSeconds
+		changed = append(changed, age)
+	}
+	for id := range last {
+		if _, ok := seen[id]; !ok {
+			delete(last, id)
+		}
+	}
+	return changed
 }
 
 func (s *Server) serverGroups(w http.ResponseWriter, r *http.Request) {

@@ -22,6 +22,11 @@ type RuntimeEvent struct {
 	Runtime RuntimeStatus `json:"runtime"`
 }
 
+type KeepAliveAgeEvent struct {
+	ID               string `json:"id"`
+	ConnectedSeconds int64  `json:"connectedSeconds"`
+}
+
 func NewManager(store *Store) *Manager {
 	return &Manager{
 		store:       store,
@@ -50,6 +55,24 @@ func (m *Manager) SubscribeRuntime() (<-chan RuntimeEvent, func()) {
 	return ch, cancel
 }
 
+func (m *Manager) KeepAliveAges() []KeepAliveAgeEvent {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	now := time.Now()
+	ages := make([]KeepAliveAgeEvent, 0, len(m.status))
+	for id, st := range m.status {
+		if st.KeepAlive.State != KeepAliveConnected || st.KeepAlive.ConnectedAt.IsZero() {
+			continue
+		}
+		ages = append(ages, KeepAliveAgeEvent{
+			ID:               id,
+			ConnectedSeconds: connectedSeconds(st.KeepAlive.ConnectedAt, now),
+		})
+	}
+	return ages
+}
+
 func (m *Manager) StartEnabled() {
 	for _, cfg := range m.store.ListInstances() {
 		if cfg.Enabled {
@@ -64,10 +87,11 @@ func (m *Manager) List() []InstanceSnapshot {
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	now := time.Now()
 	for _, cfg := range items {
 		out = append(out, InstanceSnapshot{
 			Config:  cfg,
-			Runtime: m.statusForLocked(cfg.ID),
+			Runtime: runtimeWithServerAges(m.statusForLocked(cfg.ID), now),
 		})
 	}
 
@@ -85,7 +109,7 @@ func (m *Manager) Snapshot(id string) (InstanceSnapshot, bool) {
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return InstanceSnapshot{Config: cfg, Runtime: m.statusForLocked(id)}, true
+	return InstanceSnapshot{Config: cfg, Runtime: runtimeWithServerAges(m.statusForLocked(id), time.Now())}, true
 }
 
 func (m *Manager) Start(id string) error {
@@ -267,6 +291,9 @@ func (m *Manager) report(id string, update RuntimeStatus) {
 	current := m.statusForLocked(id)
 	if update.State != "" {
 		current.State = update.State
+		if reportClearsKeepAlive(update) {
+			current.KeepAlive = KeepAlive{}
+		}
 		if update.State != StateError && update.LastError == "" {
 			current.LastError = ""
 		}
@@ -302,17 +329,19 @@ func (m *Manager) report(id string, update RuntimeStatus) {
 		current.LastError = update.LastError
 	}
 	if update.KeepAlive.State != "" {
-		next := update.KeepAlive
-		if next.State == KeepAliveConnected &&
-			current.KeepAlive.State == KeepAliveConnected &&
-			next.Protocol == current.KeepAlive.Protocol &&
-			next.Address == current.KeepAlive.Address &&
-			next.Port == current.KeepAlive.Port &&
-			keepAliveConnectedAtBelongsToRun(current) &&
-			!current.KeepAlive.ConnectedAt.IsZero() {
-			next.ConnectedAt = current.KeepAlive.ConnectedAt
+		if !stateBlocksKeepAlive(current.State) {
+			next := update.KeepAlive
+			if next.State == KeepAliveConnected &&
+				current.KeepAlive.State == KeepAliveConnected &&
+				next.Protocol == current.KeepAlive.Protocol &&
+				next.Address == current.KeepAlive.Address &&
+				next.Port == current.KeepAlive.Port &&
+				keepAliveConnectedAtBelongsToRun(current) &&
+				!current.KeepAlive.ConnectedAt.IsZero() {
+				next.ConnectedAt = current.KeepAlive.ConnectedAt
+			}
+			current.KeepAlive = next
 		}
-		current.KeepAlive = next
 	}
 	if update.PortCheck.State != "" {
 		current.PortCheck = update.PortCheck
@@ -351,7 +380,7 @@ func (m *Manager) setStatusLocked(id, state, message string, err error) {
 	st := m.statusForLocked(id)
 	st.State = state
 	st.LastChange = time.Now()
-	if state == StateStarting || state == StateStopping || state == StateStopped {
+	if stateClearsKeepAlive(state) {
 		st.KeepAlive = KeepAlive{}
 	}
 	if err != nil {
@@ -368,6 +397,21 @@ func (m *Manager) setStatusLocked(id, state, message string, err error) {
 	m.notifyStatusLocked(id, st)
 }
 
+func stateClearsKeepAlive(state string) bool {
+	return state == StateStarting || state == StateStopping || state == StateStopped
+}
+
+func reportClearsKeepAlive(update RuntimeStatus) bool {
+	if update.State == StateStopping || update.State == StateStopped {
+		return true
+	}
+	return update.State == StateStarting && update.StartedAt != nil
+}
+
+func stateBlocksKeepAlive(state string) bool {
+	return state == StateStopping || state == StateStopped
+}
+
 func keepAliveConnectedAtBelongsToRun(st RuntimeStatus) bool {
 	if st.StartedAt == nil {
 		return true
@@ -375,11 +419,27 @@ func keepAliveConnectedAtBelongsToRun(st RuntimeStatus) bool {
 	return !st.KeepAlive.ConnectedAt.Before(*st.StartedAt)
 }
 
+func runtimeWithServerAges(st RuntimeStatus, now time.Time) RuntimeStatus {
+	if st.KeepAlive.State == KeepAliveConnected && !st.KeepAlive.ConnectedAt.IsZero() {
+		st.KeepAlive.ConnectedSeconds = connectedSeconds(st.KeepAlive.ConnectedAt, now)
+	} else {
+		st.KeepAlive.ConnectedSeconds = 0
+	}
+	return st
+}
+
+func connectedSeconds(connectedAt, now time.Time) int64 {
+	if now.Before(connectedAt) {
+		return 0
+	}
+	return int64(now.Sub(connectedAt).Seconds())
+}
+
 func (m *Manager) notifyStatusLocked(id string, st RuntimeStatus) {
 	if len(m.subscribers) == 0 {
 		return
 	}
-	event := RuntimeEvent{ID: id, Runtime: cloneRuntimeStatus(st)}
+	event := RuntimeEvent{ID: id, Runtime: cloneRuntimeStatus(runtimeWithServerAges(st, time.Now()))}
 	for ch := range m.subscribers {
 		select {
 		case ch <- event:
