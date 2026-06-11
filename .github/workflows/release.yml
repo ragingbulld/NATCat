@@ -28,20 +28,37 @@ jobs:
       - name: Build release binaries
         run: |
           mkdir -p dist
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/natcat-linux-amd64 ./cmd/natcat
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o dist/natcat-windows-amd64.exe ./cmd/natcat
+          version="${GITHUB_REF_NAME}"
+          linux_dir="dist/natcat-${version}-linux-amd64"
+          windows_dir="dist/natcat-${version}-windows-amd64"
+          mkdir -p "${linux_dir}" "${windows_dir}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "${linux_dir}/natcat" ./cmd/natcat
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "${windows_dir}/natcat.exe" ./cmd/natcat
+          cp README.md LICENSE "${linux_dir}/"
+          cp README.md LICENSE "${windows_dir}/"
+          tar -czf "dist/natcat-${version}-linux-amd64.tar.gz" -C dist "natcat-${version}-linux-amd64"
           cd dist
-          tar -czf natcat-linux-amd64.tar.gz natcat-linux-amd64
-          zip -q natcat-windows-amd64.zip natcat-windows-amd64.exe
-          sha256sum natcat-linux-amd64 natcat-linux-amd64.tar.gz natcat-windows-amd64.exe natcat-windows-amd64.zip > SHA256SUMS.txt
+          zip -qr "natcat-${version}-windows-amd64.zip" "natcat-${version}-windows-amd64"
+          sha256sum "natcat-${version}-linux-amd64.tar.gz" "natcat-${version}-windows-amd64.zip" > "SHA256SUMS-${version}.txt"
+
+      - name: Delete existing release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name' |
+              while read -r asset; do
+                if [ -n "${asset}" ]; then
+                  gh release delete-asset "${GITHUB_REF_NAME}" "${asset}" --yes
+                fi
+              done
+          fi
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            dist/natcat-linux-amd64
-            dist/natcat-linux-amd64.tar.gz
-            dist/natcat-windows-amd64.exe
-            dist/natcat-windows-amd64.zip
-            dist/SHA256SUMS.txt
+            dist/natcat-${{ github.ref_name }}-linux-amd64.tar.gz
+            dist/natcat-${{ github.ref_name }}-windows-amd64.zip
+            dist/SHA256SUMS-${{ github.ref_name }}.txt
