@@ -139,7 +139,7 @@ function showApp() {
   el.login.classList.add("hidden");
   el.app.classList.remove("hidden");
   if (!state.poller) {
-    state.poller = setInterval(() => loadInstances().catch(() => {}), 3000);
+    state.poller = setInterval(() => loadInstances().catch(() => {}), 1000);
   }
   if (!state.checkPoller) {
     state.checkPoller = setInterval(() => runVisibleTCPChecks().catch(() => {}), 30000);

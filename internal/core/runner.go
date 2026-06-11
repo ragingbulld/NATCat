@@ -26,7 +26,7 @@ const (
 	quicKeepAliveRequestTimeout = 2 * time.Second
 	tcpKeepAliveRequestTimeout  = 2 * time.Second
 	tcpPublicProbeDialTimeout   = 5 * time.Second
-	reconnectVisibleDuration    = 3500 * time.Millisecond
+	reconnectVisibleDuration    = 1500 * time.Millisecond
 	udpSTUNResponseTimeout      = 1200 * time.Millisecond
 	udpSTUNRetries              = 3
 )
@@ -197,29 +197,14 @@ func (r *Runner) runTCP(ctx context.Context) error {
 
 	bindIP := parseBindIP(r.cfg.BindAddress)
 	bindPort := r.bindPort()
-	keepEndpoint, httpAddr, keepConn, actualLocal, untrackKeep, connectLatency, err := r.openTCPKeepAliveFromServers(ctx, network, bindIP, bindPort, keepAliveServers(r.cfg))
+	mapping, actualLocal, err := r.confirmedInitialTCPPublicProbe(ctx, network, bindIP, bindPort, stunServers(r.cfg))
 	if err != nil {
 		if isLocalPortUnavailable(err) {
 			r.advanceBindPort()
 		}
-		localAddr := &net.TCPAddr{IP: bindIP, Port: bindPort}
-		remote := "configured servers"
-		if httpAddr != nil {
-			remote = httpAddr.String()
-		}
-		return fmt.Errorf("tcp keep-alive connect from %s to %s: %w", localAddr.String(), remote, err)
+		return err
 	}
 	r.keepBindPort(actualLocal.Port)
-	tcpLatency := connectLatency
-	r.emitKeepAlive(KeepAliveConnected, "tcp", httpAddr, fmt.Sprintf("tcp rtt %dms", tcpLatency), tcpLatency)
-	closeKeep := func(abort bool) {
-		if keepConn == nil {
-			return
-		}
-		untrackKeep()
-		closeTCP(keepConn, abort)
-		keepConn = nil
-	}
 
 	privateIP := actualLocal.IP
 	privatePort := actualLocal.Port
@@ -234,13 +219,30 @@ func (r *Runner) runTCP(ctx context.Context) error {
 		Logs:           []LogEntry{{At: time.Now(), Level: "info", Message: fmt.Sprintf("tcp bound on %s", actualLocal.String())}},
 	})
 
-	mapping, err := r.confirmedTCPPublicProbe(ctx, network, privateIP, privatePort, stunServers(r.cfg))
+	keepEndpoint, httpAddr, keepConn, actualKeepLocal, untrackKeep, connectLatency, err := r.openTCPKeepAliveFromServers(ctx, network, privateIP, privatePort, keepAliveServers(r.cfg))
 	if err != nil {
 		if isLocalPortUnavailable(err) {
 			r.advanceBindPort()
 		}
-		closeKeep(true)
-		return err
+		localAddr := &net.TCPAddr{IP: privateIP, Port: privatePort}
+		remote := "configured servers"
+		if httpAddr != nil {
+			remote = httpAddr.String()
+		}
+		return fmt.Errorf("tcp keep-alive connect from %s to %s: %w", localAddr.String(), remote, err)
+	}
+	if actualKeepLocal != nil {
+		r.keepBindPort(actualKeepLocal.Port)
+	}
+	tcpLatency := connectLatency
+	r.emitKeepAlive(KeepAliveConnected, "tcp", httpAddr, fmt.Sprintf("tcp rtt %dms", tcpLatency), tcpLatency)
+	closeKeep := func(abort bool) {
+		if keepConn == nil {
+			return
+		}
+		untrackKeep()
+		closeTCP(keepConn, abort)
+		keepConn = nil
 	}
 
 	event := mappingEvent{
@@ -277,6 +279,11 @@ func (r *Runner) runTCP(ctx context.Context) error {
 				closeTCP(nextConn, true)
 			}
 		}
+		if err := waitMinimumReconnectVisible(ctx, reconnectingAt); err != nil {
+			closeNextKeep()
+			return err
+		}
+		r.emitKeepAlive(KeepAliveConnected, "tcp", nextAddr, fmt.Sprintf("tcp rtt %dms", nextLatency), nextLatency)
 
 		check, reachable, err := r.checkCurrentTCPMapping(ctx, event)
 		if check.State != "" {
@@ -287,34 +294,77 @@ func (r *Runner) runTCP(ctx context.Context) error {
 			return err
 		}
 		if !reachable {
-			closeNextKeep()
-			r.emitKeepAlive(KeepAliveReconnecting, "tcp", nextAddr, "current public tcp mapping is not reachable; rebuilding session", 0)
+			r.emitKeepAlive(KeepAliveConnected, "tcp", nextAddr, "current public tcp mapping is not reachable; querying public mapping", nextLatency)
+			mapping, err := r.confirmedTCPPublicProbe(ctx, network, privateIP, privatePort, stunServers(r.cfg))
+			if err != nil {
+				closeNextKeep()
+				r.emitKeepAlive(KeepAliveReconnecting, "tcp", nextAddr, "tcp public probe failed after keep-alive reconnect; rebuilding session", 0)
+				r.emit(RuntimeStatus{
+					State: StateStarting,
+					Logs: []LogEntry{{
+						At:      time.Now(),
+						Level:   "info",
+						Message: fmt.Sprintf("tcp public probe failed after keep-alive reconnect; rebuilding session and running a new public probe: %v", err),
+					}},
+				})
+				return fmt.Errorf("%w: tcp public probe failed after keep-alive reconnect: %v", errSessionClosed, err)
+			}
+			event = mappingEvent{
+				PublicIP:    mapping.IP,
+				PublicPort:  mapping.Port,
+				PrivateIP:   privateIP,
+				PrivatePort: privatePort,
+				Protocol:    "tcp",
+			}
+			r.publishMapping(event)
 			r.emit(RuntimeStatus{
-				State: StateStarting,
-				Logs: []LogEntry{{
-					At:      time.Now(),
-					Level:   "info",
-					Message: "current public tcp mapping is not reachable after keep-alive reconnect; rebuilding session and running a new public probe",
-				}},
+				Logs: []LogEntry{{At: time.Now(), Level: "info", Message: "tcp public mapping refreshed after keep-alive reconnect"}},
 			})
-			return fmt.Errorf("%w: current public tcp mapping is not reachable: %s", errSessionClosed, check.Message)
 		}
 
-		if err := waitMinimumReconnectVisible(ctx, reconnectingAt); err != nil {
-			closeNextKeep()
-			return err
-		}
 		keepEndpoint = nextEndpoint
 		httpAddr = nextAddr
 		keepConn = nextConn
 		untrackKeep = nextUntrack
 		tcpLatency = nextLatency
 		r.emitKeepAlive(KeepAliveConnected, "tcp", httpAddr, fmt.Sprintf("tcp rtt %dms", tcpLatency), tcpLatency)
+		logMessage := "keep-alive reconnected; current public mapping is reachable"
+		if !reachable {
+			logMessage = "keep-alive reconnected; public mapping refreshed"
+		}
 		r.emit(RuntimeStatus{
 			State: StateRunning,
-			Logs:  []LogEntry{{At: time.Now(), Level: "info", Message: "keep-alive reconnected; current public mapping is reachable"}},
+			Logs:  []LogEntry{{At: time.Now(), Level: "info", Message: logMessage}},
 		})
 	}
+}
+
+func (r *Runner) confirmedInitialTCPPublicProbe(ctx context.Context, network string, bindIP net.IP, bindPort int, endpoints []ServerEndpoint) (stunResult, *net.TCPAddr, error) {
+	privateIP := bindIP
+	privatePort := bindPort
+	var actualLocal *net.TCPAddr
+
+	mapping, err := r.confirmPublicProbe(ctx, len(endpoints), func() (stunResult, error) {
+		result, local, err := r.tcpPublicProbe(ctx, network, privateIP, privatePort, endpoints)
+		if err != nil {
+			return stunResult{}, err
+		}
+		if local != nil {
+			actualLocal = local
+			if privateIP == nil || privateIP.IsUnspecified() {
+				privateIP = local.IP
+			}
+			privatePort = local.Port
+		}
+		return result, nil
+	})
+	if err != nil {
+		return stunResult{}, nil, err
+	}
+	if actualLocal == nil {
+		actualLocal = &net.TCPAddr{IP: privateIP, Port: privatePort}
+	}
+	return mapping, actualLocal, nil
 }
 
 func (r *Runner) reconnectTCPKeepAliveBeforePublicCheck(ctx context.Context, network string, privateIP net.IP, privatePort int, current ServerEndpoint, endpoints []ServerEndpoint) (ServerEndpoint, *net.TCPAddr, *net.TCPConn, func(), int64, error) {
@@ -462,9 +512,9 @@ func (r *Runner) openTCPKeepAliveFromServers(ctx context.Context, network string
 	return ServerEndpoint{}, nil, nil, nil, nil, 0, fmt.Errorf("tcp keep-alive server selection failed: %w", lastErr)
 }
 
-func (r *Runner) tcpPublicProbe(ctx context.Context, network string, privateIP net.IP, privatePort int, endpoints []ServerEndpoint) (stunResult, error) {
+func (r *Runner) tcpPublicProbe(ctx context.Context, network string, privateIP net.IP, privatePort int, endpoints []ServerEndpoint) (stunResult, *net.TCPAddr, error) {
 	if len(endpoints) == 0 {
-		return stunResult{}, errors.New("no tcp public probe servers configured")
+		return stunResult{}, nil, errors.New("no tcp public probe servers configured")
 	}
 
 	stunDialer := &net.Dialer{
@@ -488,24 +538,26 @@ func (r *Runner) tcpPublicProbe(ctx context.Context, network string, privateIP n
 			}
 			continue
 		}
+		actualLocal, _ := stunConn.LocalAddr().(*net.TCPAddr)
 		untrackStun := r.track(stunConn)
 		mapping, err := stunTCP(stunConn)
 		untrackStun()
 		closeTCP(stunConn, true)
 		if err == nil {
-			return mapping, nil
+			return mapping, actualLocal, nil
 		}
 		lastErr = fmt.Errorf("tcp public probe query %s: %w", stunAddr.String(), err)
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no tcp public probe servers configured")
 	}
-	return stunResult{}, lastErr
+	return stunResult{}, nil, lastErr
 }
 
 func (r *Runner) confirmedTCPPublicProbe(ctx context.Context, network string, privateIP net.IP, privatePort int, endpoints []ServerEndpoint) (stunResult, error) {
 	return r.confirmPublicProbe(ctx, len(endpoints), func() (stunResult, error) {
-		return r.tcpPublicProbe(ctx, network, privateIP, privatePort, endpoints)
+		result, _, err := r.tcpPublicProbe(ctx, network, privateIP, privatePort, endpoints)
+		return result, err
 	})
 }
 
@@ -585,11 +637,15 @@ func (r *Runner) tcpKeepAlive(ctx context.Context, conn *net.TCPConn, endpoint S
 	}
 	request := "HEAD / HTTP/1.1\r\nHost: " + host + "\r\nConnection: keep-alive\r\n\r\n"
 	keep := time.Duration(r.cfg.KeepAliveSeconds) * time.Second
-	interval := keep
+	interval := time.Duration(0)
 	reader := bufio.NewReader(conn)
 
 	for {
-		if ctx.Err() != nil {
+		if interval > 0 {
+			if err := r.waitTCPKeepAliveInterval(ctx, conn, reader, interval); err != nil {
+				return err
+			}
+		} else if ctx.Err() != nil {
 			return errStopped
 		}
 		if err := conn.SetWriteDeadline(time.Now().Add(30 * time.Second)); err != nil {
@@ -619,6 +675,7 @@ func (r *Runner) tcpKeepAlive(ctx context.Context, conn *net.TCPConn, endpoint S
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 		}
+		interval = keep
 
 		if resp.Close {
 			return fmt.Errorf("%w: tcp keep-alive response requested close", errSessionClosed)
@@ -626,9 +683,6 @@ func (r *Runner) tcpKeepAlive(ctx context.Context, conn *net.TCPConn, endpoint S
 		latency := tcpRTTMilliseconds(conn, lastLatency)
 		lastLatency = latency
 		r.emitKeepAlive(KeepAliveConnected, "tcp", conn.RemoteAddr(), fmt.Sprintf("tcp rtt %dms", latency), latency)
-		if err := r.waitTCPKeepAliveInterval(ctx, conn, reader, interval); err != nil {
-			return err
-		}
 	}
 }
 
@@ -708,6 +762,22 @@ func (r *Runner) runUDP(ctx context.Context) error {
 	sharedConn := newSharedUDPConn(conn)
 	defer sharedConn.Close()
 
+	if ctx.Err() != nil {
+		return errStopped
+	}
+
+	r.emit(RuntimeStatus{
+		State:          StateStarting,
+		PrivateAddress: privateIP.String(),
+		PrivatePort:    privatePort,
+		Logs:           []LogEntry{{At: time.Now(), Level: "info", Message: fmt.Sprintf("udp bound on %s", actualLocal.String())}},
+	})
+
+	result, err := r.confirmedInitialUDPPublicProbe(ctx, network, conn, stunServers(r.cfg))
+	if err != nil {
+		return fmt.Errorf("udp public probe query: %w", err)
+	}
+
 	keepEndpoint, quicAddr, quicTransport, connectLatency, err := r.openQUICKeepAliveFromServers(ctx, sharedConn, network, keepAliveServers(r.cfg), quicInitialConnectTimeout)
 	if err != nil {
 		if isLocalPortUnavailable(err) {
@@ -725,22 +795,6 @@ func (r *Runner) runUDP(ctx context.Context) error {
 		}
 	}()
 	r.emitKeepAlive(KeepAliveConnected, "udp", quicAddr, fmt.Sprintf("quic rtt %dms", connectLatency), connectLatency)
-
-	if ctx.Err() != nil {
-		return errStopped
-	}
-
-	r.emit(RuntimeStatus{
-		State:          StateStarting,
-		PrivateAddress: privateIP.String(),
-		PrivatePort:    privatePort,
-		Logs:           []LogEntry{{At: time.Now(), Level: "info", Message: fmt.Sprintf("udp bound on %s", actualLocal.String())}},
-	})
-
-	result, err := r.confirmedUDPPublicProbe(ctx, network, conn, sharedConn.stunResponses, stunServers(r.cfg))
-	if err != nil {
-		return fmt.Errorf("udp public probe query: %w", err)
-	}
 
 	event := mappingEvent{
 		PublicIP:    result.IP,
@@ -777,6 +831,11 @@ func (r *Runner) runUDP(ctx context.Context) error {
 				_ = nextTransport.Close()
 			}
 		}
+		if err := waitMinimumReconnectVisible(ctx, reconnectingAt); err != nil {
+			closeNextKeep()
+			return err
+		}
+		r.emitKeepAlive(KeepAliveConnected, "udp", nextAddr, fmt.Sprintf("quic rtt %dms", nextLatency), nextLatency)
 
 		result, err := r.confirmedUDPPublicProbe(ctx, network, conn, sharedConn.stunResponses, stunServers(r.cfg))
 		if err != nil {
@@ -793,10 +852,6 @@ func (r *Runner) runUDP(ctx context.Context) error {
 			return fmt.Errorf("%w: udp public probe failed after quic keep-alive reconnect: %v", errSessionClosed, err)
 		}
 
-		if err := waitMinimumReconnectVisible(ctx, reconnectingAt); err != nil {
-			closeNextKeep()
-			return err
-		}
 		keepEndpoint = nextEndpoint
 		quicAddr = nextAddr
 		quicTransport = nextTransport
@@ -1197,7 +1252,12 @@ func (r *Runner) udpPublicProbe(ctx context.Context, network string, conn *net.U
 			lastErr = err
 			continue
 		}
-		result, err := r.stunUDPShared(ctx, conn, addr, responses)
+		var result stunResult
+		if responses == nil {
+			result, err = r.stunUDPDirect(ctx, conn, addr)
+		} else {
+			result, err = r.stunUDPShared(ctx, conn, addr, responses)
+		}
 		if err == nil {
 			return result, nil
 		}
@@ -1210,6 +1270,12 @@ func (r *Runner) udpPublicProbe(ctx context.Context, network string, conn *net.U
 		lastErr = errors.New("no udp public probe servers configured")
 	}
 	return stunResult{}, lastErr
+}
+
+func (r *Runner) confirmedInitialUDPPublicProbe(ctx context.Context, network string, conn *net.UDPConn, endpoints []ServerEndpoint) (stunResult, error) {
+	return r.confirmPublicProbe(ctx, len(endpoints), func() (stunResult, error) {
+		return r.udpPublicProbe(ctx, network, conn, nil, endpoints)
+	})
 }
 
 func (r *Runner) confirmedUDPPublicProbe(ctx context.Context, network string, conn *net.UDPConn, responses <-chan stunResult, endpoints []ServerEndpoint) (stunResult, error) {
@@ -1297,12 +1363,7 @@ func formatPublicProbeResult(result stunResult) string {
 	return net.JoinHostPort(result.IP.String(), strconv.Itoa(result.Port))
 }
 
-func (r *Runner) stunUDPShared(ctx context.Context, conn *net.UDPConn, addr *net.UDPAddr, responses <-chan stunResult) (stunResult, error) {
-	request, tid, err := stunRequest()
-	if err != nil {
-		return stunResult{}, err
-	}
-
+func (r *Runner) udpSTUNProbeTiming() (time.Duration, int) {
 	timeout := udpSTUNResponseTimeout
 	retries := udpSTUNRetries
 	if runtime.GOOS == "windows" {
@@ -1313,6 +1374,71 @@ func (r *Runner) stunUDPShared(ctx context.Context, conn *net.UDPConn, addr *net
 		}
 	}
 	r.udpQueries++
+	return timeout, retries
+}
+
+func (r *Runner) stunUDPDirect(ctx context.Context, conn *net.UDPConn, addr *net.UDPAddr) (stunResult, error) {
+	request, tid, err := stunRequest()
+	if err != nil {
+		return stunResult{}, err
+	}
+
+	timeout, retries := r.udpSTUNProbeTiming()
+	buf := make([]byte, 2048)
+	defer conn.SetReadDeadline(time.Time{})
+
+	for attempt := 0; attempt < retries; attempt++ {
+		if ctx.Err() != nil {
+			return stunResult{}, ctx.Err()
+		}
+		if _, err := conn.WriteToUDP(request, addr); err != nil {
+			if ctx.Err() != nil {
+				return stunResult{}, ctx.Err()
+			}
+			return stunResult{}, err
+		}
+
+		deadline := time.Now().Add(timeout)
+		for {
+			if ctx.Err() != nil {
+				return stunResult{}, ctx.Err()
+			}
+			if err := conn.SetReadDeadline(deadline); err != nil {
+				return stunResult{}, err
+			}
+			n, source, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				if ctx.Err() != nil {
+					return stunResult{}, ctx.Err()
+				}
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					break
+				}
+				return stunResult{}, err
+			}
+			result, err := parseSTUN(buf[:n])
+			if err != nil {
+				continue
+			}
+			if source != nil {
+				result.Source = source.String()
+			}
+			if result.TID == tid && stunSourceMatches(result.Source, addr) {
+				return result, nil
+			}
+		}
+	}
+
+	return stunResult{}, errors.New("stun response timeout")
+}
+
+func (r *Runner) stunUDPShared(ctx context.Context, conn *net.UDPConn, addr *net.UDPAddr, responses <-chan stunResult) (stunResult, error) {
+	request, tid, err := stunRequest()
+	if err != nil {
+		return stunResult{}, err
+	}
+
+	timeout, retries := r.udpSTUNProbeTiming()
 
 	for attempt := 0; attempt < retries; attempt++ {
 		if ctx.Err() != nil {
