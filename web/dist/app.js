@@ -88,7 +88,7 @@ function emptyConfig() {
     httpHost: "qq.com",
     httpPort: 80,
     interface: "",
-    keepAliveSeconds: 5,
+    keepAliveSeconds: 30,
     mappingConfirmations: 2,
     notifyScript: "",
     fwMark: 0,
@@ -1089,7 +1089,7 @@ function fillForm(cfg) {
   f.httpHost.value = cfg.httpHost || "";
   f.httpPort.value = cfg.httpPort || ((cfg.protocol || "tcp") === "udp" ? 443 : 80);
   f.interface.value = cfg.interface || "";
-  f.keepAliveSeconds.value = cfg.keepAliveSeconds || 5;
+  f.keepAliveSeconds.value = cfg.keepAliveSeconds || 30;
   f.mappingConfirmations.value = cfg.mappingConfirmations || 2;
   f.notifyScript.value = cfg.notifyScript || "";
   f.fwMark.value = cfg.fwMark || 0;
@@ -1116,7 +1116,7 @@ function readForm() {
     httpHost: f.httpHost.value.trim(),
     httpPort: numberValue(f.httpPort.value, f.protocol.value === "udp" ? 443 : 80),
     interface: f.interface.value.trim(),
-    keepAliveSeconds: numberValue(f.keepAliveSeconds.value, 5),
+    keepAliveSeconds: numberValue(f.keepAliveSeconds.value, 30),
     mappingConfirmations: numberValue(f.mappingConfirmations.value, 2),
     notifyScript: f.notifyScript.value.trim(),
     fwMark: numberValue(f.fwMark.value, 0),
@@ -1465,7 +1465,7 @@ function setProtocol(protocol) {
       el.form.elements.httpHost.value = "qq.com";
     }
     if (!el.form.elements.keepAliveSeconds.value.trim()) {
-      el.form.elements.keepAliveSeconds.value = "5";
+      el.form.elements.keepAliveSeconds.value = "30";
     }
   }
 }

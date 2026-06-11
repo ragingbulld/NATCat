@@ -53,7 +53,7 @@ func normalizeConfig(cfg *InstanceConfig) {
 		}
 	}
 	if cfg.KeepAliveSeconds <= 0 {
-		cfg.KeepAliveSeconds = 5
+		cfg.KeepAliveSeconds = 30
 	}
 	if cfg.MappingConfirmations <= 0 {
 		cfg.MappingConfirmations = defaultMappingConfirmations
