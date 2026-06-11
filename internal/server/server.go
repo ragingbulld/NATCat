@@ -34,6 +34,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/login", s.login)
 	mux.HandleFunc("/api/logout", s.requireAuth(s.logout))
 	mux.HandleFunc("/api/me", s.requireAuth(s.me))
+	mux.HandleFunc("/api/events", s.requireAuth(s.events))
 	mux.HandleFunc("/api/server-groups", s.requireAuth(s.serverGroups))
 	mux.HandleFunc("/api/instances", s.requireAuth(s.instances))
 	mux.HandleFunc("/api/instances/", s.requireAuth(s.instanceByID))
@@ -81,6 +82,49 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"username": s.store.Admin().Username})
+}
+
+func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "event stream is not supported")
+		return
+	}
+
+	events, unsubscribe := s.manager.SubscribeRuntime()
+	defer unsubscribe()
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	if !writeSSE(w, flusher, "ready", map[string]bool{"ok": true}) {
+		return
+	}
+
+	heartbeat := time.NewTicker(20 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, ok := <-events:
+			if !ok || !writeSSE(w, flusher, "runtime", event) {
+				return
+			}
+		case <-heartbeat.C:
+			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 func (s *Server) serverGroups(w http.ResponseWriter, r *http.Request) {
@@ -357,6 +401,27 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func writeSSE(w http.ResponseWriter, flusher http.Flusher, event string, value any) bool {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	if _, err := w.Write([]byte("event: " + event + "\n")); err != nil {
+		return false
+	}
+	if _, err := w.Write([]byte("data: ")); err != nil {
+		return false
+	}
+	if _, err := w.Write(raw); err != nil {
+		return false
+	}
+	if _, err := w.Write([]byte("\n\n")); err != nil {
+		return false
+	}
+	flusher.Flush()
+	return true
 }
 
 func methodNotAllowed(w http.ResponseWriter) {

@@ -22,16 +22,20 @@ type stunResult struct {
 	TID    [12]byte
 	IP     net.IP
 	Port   int
+	Server string
 	Source string
 }
 
-func stunTCP(conn net.Conn) (stunResult, error) {
+func stunTCP(conn net.Conn, timeout time.Duration) (stunResult, error) {
 	request, tid, err := stunRequest()
 	if err != nil {
 		return stunResult{}, err
 	}
 
-	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return stunResult{}, err
 	}
 	defer conn.SetDeadline(time.Time{})

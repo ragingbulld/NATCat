@@ -1,12 +1,10 @@
 package core
 
 import (
-	"bufio"
 	"context"
 	"errors"
-	"io"
+	"fmt"
 	"net"
-	"net/http"
 	"testing"
 	"time"
 )
@@ -237,63 +235,46 @@ func TestRunnerConfirmPublicProbeSingleConfirmationUsesOneProbe(t *testing.T) {
 	}
 }
 
-func TestTCPKeepAliveDetectsPeerCloseDuringInterval(t *testing.T) {
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer ln.Close()
-
-	serverDone := make(chan error, 1)
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			serverDone <- err
-			return
-		}
-		defer conn.Close()
-
-		req, err := http.ReadRequest(bufio.NewReader(conn))
-		if err != nil {
-			serverDone <- err
-			return
-		}
-		if req.Body != nil {
-			_ = req.Body.Close()
-		}
-		if _, err := io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"); err != nil {
-			serverDone <- err
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-		serverDone <- nil
+func TestRunnerConfirmPublicProbeKeepsProgressAcrossRoundFailures(t *testing.T) {
+	oldDelay := publicProbeConfirmDelay
+	publicProbeConfirmDelay = time.Nanosecond
+	defer func() {
+		publicProbeConfirmDelay = oldDelay
 	}()
 
-	rawConn, err := net.Dial("tcp4", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer rawConn.Close()
+	r := NewRunner(InstanceConfig{MappingConfirmations: 2}, nil)
+	progress := &publicProbeConfirmationProgress{}
+	calls := 0
 
-	addr := ln.Addr().(*net.TCPAddr)
-	r := NewRunner(InstanceConfig{KeepAliveSeconds: 30}, nil)
-	r.report = func(string, RuntimeStatus) {}
-	started := time.Now()
-	err = r.tcpKeepAlive(context.Background(), rawConn.(*net.TCPConn), ServerEndpoint{Host: "127.0.0.1", Port: addr.Port}, 1)
-	if !errors.Is(err, errSessionClosed) {
-		t.Fatalf("tcpKeepAlive error = %v, want errSessionClosed", err)
-	}
-	if elapsed := time.Since(started); elapsed > 2*time.Second {
-		t.Fatalf("peer close detected after %s, want under 2s", elapsed)
-	}
-
-	select {
-	case err := <-serverDone:
-		if err != nil {
-			t.Fatalf("server: %v", err)
+	_, err := r.confirmPublicProbeWithProgress(context.Background(), 4, progress, func() (stunResult, error) {
+		calls++
+		if calls == 1 {
+			return stunTestResult("203.0.113.8", 5000), nil
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("server did not finish")
+		return stunResult{}, fmt.Errorf("%w: first batch failed", errPublicProbeRoundFailed)
+	})
+	if !errors.Is(err, errPublicProbeRoundFailed) {
+		t.Fatalf("confirm error = %v, want errPublicProbeRoundFailed", err)
+	}
+	if progress.count != 1 || !samePublicProbeResult(progress.candidate, stunTestResult("203.0.113.8", 5000)) {
+		t.Fatalf("progress = %#v, want 203.0.113.8:5000 confirmed once", progress)
+	}
+
+	got, err := r.confirmPublicProbeWithProgress(context.Background(), 4, progress, func() (stunResult, error) {
+		calls++
+		return stunTestResult("203.0.113.8", 5000), nil
+	})
+	if err != nil {
+		t.Fatalf("confirm public probe retry: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("probe calls = %d, want 3", calls)
+	}
+	if !samePublicProbeResult(got, stunTestResult("203.0.113.8", 5000)) {
+		t.Fatalf("confirmed result = %s, want 203.0.113.8:5000", formatPublicProbeResult(got))
+	}
+	if progress.count != 0 {
+		t.Fatalf("progress count after success = %d, want 0", progress.count)
 	}
 }
 

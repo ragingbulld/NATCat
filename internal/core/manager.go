@@ -10,18 +10,44 @@ import (
 )
 
 type Manager struct {
-	store   *Store
-	mu      sync.RWMutex
-	runners map[string]*Runner
-	status  map[string]RuntimeStatus
+	store       *Store
+	mu          sync.RWMutex
+	runners     map[string]*Runner
+	status      map[string]RuntimeStatus
+	subscribers map[chan RuntimeEvent]struct{}
+}
+
+type RuntimeEvent struct {
+	ID      string        `json:"id"`
+	Runtime RuntimeStatus `json:"runtime"`
 }
 
 func NewManager(store *Store) *Manager {
 	return &Manager{
-		store:   store,
-		runners: map[string]*Runner{},
-		status:  map[string]RuntimeStatus{},
+		store:       store,
+		runners:     map[string]*Runner{},
+		status:      map[string]RuntimeStatus{},
+		subscribers: map[chan RuntimeEvent]struct{}{},
 	}
+}
+
+func (m *Manager) SubscribeRuntime() (<-chan RuntimeEvent, func()) {
+	ch := make(chan RuntimeEvent, 64)
+
+	m.mu.Lock()
+	m.subscribers[ch] = struct{}{}
+	m.mu.Unlock()
+
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			m.mu.Lock()
+			delete(m.subscribers, ch)
+			close(ch)
+			m.mu.Unlock()
+		})
+	}
+	return ch, cancel
 }
 
 func (m *Manager) StartEnabled() {
@@ -221,6 +247,7 @@ func (m *Manager) clearRuntime(id string) {
 	st.Protocol = ""
 	st.PortCheck = PortCheck{}
 	m.status[id] = st
+	m.notifyStatusLocked(id, st)
 	m.mu.Unlock()
 	_ = m.store.ClearRuntimeStatus(id)
 }
@@ -299,6 +326,7 @@ func (m *Manager) report(id string, update RuntimeStatus) {
 		current.LastChange = time.Now()
 	}
 	m.status[id] = current
+	m.notifyStatusLocked(id, current)
 	if update.PublicAddress != "" || update.PublicPort != 0 || !update.PublicUpdatedAt.IsZero() {
 		_ = m.store.SaveRuntimeStatus(id, current)
 	}
@@ -333,6 +361,37 @@ func (m *Manager) setStatusLocked(id, state, message string, err error) {
 		st.Logs = st.Logs[len(st.Logs)-100:]
 	}
 	m.status[id] = st
+	m.notifyStatusLocked(id, st)
+}
+
+func (m *Manager) notifyStatusLocked(id string, st RuntimeStatus) {
+	if len(m.subscribers) == 0 {
+		return
+	}
+	event := RuntimeEvent{ID: id, Runtime: cloneRuntimeStatus(st)}
+	for ch := range m.subscribers {
+		select {
+		case ch <- event:
+		default:
+			select {
+			case <-ch:
+			default:
+			}
+			select {
+			case ch <- event:
+			default:
+			}
+		}
+	}
+}
+
+func cloneRuntimeStatus(st RuntimeStatus) RuntimeStatus {
+	if st.Logs != nil {
+		logs := make([]LogEntry, len(st.Logs))
+		copy(logs, st.Logs)
+		st.Logs = logs
+	}
+	return st
 }
 
 var (

@@ -12,7 +12,7 @@ import (
 const (
 	defaultProbeHost            = "turn.cloudflare.com"
 	defaultProbePort            = 3478
-	defaultMappingConfirmations = 3
+	defaultMappingConfirmations = 2
 	maxMappingConfirmations     = 20
 )
 
