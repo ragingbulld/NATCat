@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -180,6 +181,66 @@ func TestRunnerPublishMappingEmitsMappedLogOnceAfterSeededRestart(t *testing.T) 
 	}
 }
 
+func TestRunnerSkipsTCPPublicProbeAfterReconnectWhenMappingReachable(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	accepted := make(chan struct{})
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			_ = conn.Close()
+		}
+		close(accepted)
+	}()
+
+	addr := listener.Addr().(*net.TCPAddr)
+	r := NewRunner(InstanceConfig{Protocol: "tcp"}, nil)
+	r.lastMap = &mappingEvent{
+		PublicIP:    addr.IP,
+		PublicPort:  addr.Port,
+		PrivateIP:   net.ParseIP("192.168.1.10"),
+		PrivatePort: 5000,
+		Protocol:    "tcp",
+	}
+	var updates []RuntimeStatus
+	r.report = func(_ string, update RuntimeStatus) {
+		updates = append(updates, update)
+	}
+
+	if !r.skipTCPPublicProbeAfterReconnect(context.Background(), net.ParseIP("192.168.1.10"), 5000) {
+		t.Fatal("reachable mapping should skip tcp public probe")
+	}
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("reachability check did not connect to listener")
+	}
+	if !runtimeLogsContain(updates, "--action skip-stun") {
+		t.Fatalf("logs = %#v, want skip-stun action", updates)
+	}
+	if !runtimePortCheckState(updates, "open") {
+		t.Fatalf("updates = %#v, want open port check", updates)
+	}
+}
+
+func TestRunnerKeepsTCPPublicProbeAfterReconnectWithoutCurrentMapping(t *testing.T) {
+	r := NewRunner(InstanceConfig{Protocol: "tcp"}, nil)
+	var updates []RuntimeStatus
+	r.report = func(_ string, update RuntimeStatus) {
+		updates = append(updates, update)
+	}
+
+	if r.skipTCPPublicProbeAfterReconnect(context.Background(), net.ParseIP("192.168.1.10"), 5000) {
+		t.Fatal("missing mapping should keep tcp public probe")
+	}
+	if !runtimeLogsContain(updates, "no-current-mapping") || !runtimeLogsContain(updates, "--action stun") {
+		t.Fatalf("logs = %#v, want no-current-mapping action stun", updates)
+	}
+}
+
 func TestRunnerConfirmPublicProbeRequiresConsecutiveMatches(t *testing.T) {
 	oldDelay := publicProbeConfirmDelay
 	publicProbeConfirmDelay = time.Nanosecond
@@ -280,4 +341,24 @@ func TestRunnerConfirmPublicProbeKeepsProgressAcrossRoundFailures(t *testing.T) 
 
 func stunTestResult(ip string, port int) stunResult {
 	return stunResult{IP: net.ParseIP(ip), Port: port}
+}
+
+func runtimeLogsContain(updates []RuntimeStatus, needle string) bool {
+	for _, update := range updates {
+		for _, entry := range update.Logs {
+			if strings.Contains(entry.Message, needle) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func runtimePortCheckState(updates []RuntimeStatus, state string) bool {
+	for _, update := range updates {
+		if update.PortCheck.State == state {
+			return true
+		}
+	}
+	return false
 }

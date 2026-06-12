@@ -22,14 +22,15 @@ import (
 )
 
 const (
-	quicInitialConnectTimeout   = 8 * time.Second
-	quicKeepAliveRequestTimeout = 2 * time.Second
-	tcpKeepAliveRequestTimeout  = 2 * time.Second
-	tcpPublicProbeDialTimeout   = 2 * time.Second
-	tcpPublicProbeBatchSize     = 4
-	udpPublicProbeFanout        = 3
-	udpSTUNResponseTimeout      = 1200 * time.Millisecond
-	udpSTUNRetries              = 3
+	quicInitialConnectTimeout    = 8 * time.Second
+	quicKeepAliveRequestTimeout  = 2 * time.Second
+	tcpKeepAliveRequestTimeout   = 2 * time.Second
+	tcpPublicProbeDialTimeout    = 2 * time.Second
+	tcpPublicProbeBatchSize      = 4
+	tcpPublicReachabilityTimeout = 2500 * time.Millisecond
+	udpPublicProbeFanout         = 3
+	udpSTUNResponseTimeout       = 1200 * time.Millisecond
+	udpSTUNRetries               = 3
 )
 
 var publicProbeConfirmDelay = 500 * time.Millisecond
@@ -270,8 +271,104 @@ func (r *Runner) runTCP(ctx context.Context) error {
 		untrackKeep = nextUntrack
 		tcpLatency = nextLatency
 		r.emitKeepAlive(KeepAliveConnected, "tcp", httpAddr, fmt.Sprintf("tcp rtt %dms", tcpLatency), tcpLatency)
-		cancelProbe = r.startTCPPublicProbe(ctx, network, privateIP, privatePort)
+		if r.skipTCPPublicProbeAfterReconnect(ctx, privateIP, privatePort) {
+			cancelProbe = func() {}
+		} else {
+			cancelProbe = r.startTCPPublicProbe(ctx, network, privateIP, privatePort)
+		}
 	}
+}
+
+func (r *Runner) skipTCPPublicProbeAfterReconnect(ctx context.Context, privateIP net.IP, privatePort int) bool {
+	mapping, reason, ok := r.currentTCPPublicMapping(privateIP, privatePort)
+	if !ok {
+		r.logInfo("> public mapping check skipped --proto tcp --reason %s --action stun", reason)
+		return false
+	}
+
+	mapped := formatMappingEndpoint(mapping)
+	private := net.JoinHostPort(mapping.PrivateIP.String(), strconv.Itoa(mapping.PrivatePort))
+	r.logInfo("> public mapping check --proto tcp --mapped %s --private %s --timeout %s", mapped, private, tcpPublicReachabilityTimeout.String())
+	check, err := r.checkTCPPublicMapping(ctx, mapping)
+	if err == nil {
+		r.emit(RuntimeStatus{
+			PortCheck: check,
+			Logs:      []LogEntry{{At: time.Now(), Level: "info", Message: fmt.Sprintf("[ok] public mapping reachable --proto tcp --mapped %s --latency %dms --action skip-stun", mapped, check.LatencyMs)}},
+		})
+		return true
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	r.emit(RuntimeStatus{
+		PortCheck: check,
+		Logs:      []LogEntry{{At: time.Now(), Level: "warn", Message: fmt.Sprintf("! public mapping check failed --proto tcp --mapped %s --state %s --error %s --action stun", mapped, check.State, err.Error())}},
+	})
+	return false
+}
+
+func (r *Runner) currentTCPPublicMapping(privateIP net.IP, privatePort int) (mappingEvent, string, bool) {
+	r.mapMu.Lock()
+	defer r.mapMu.Unlock()
+
+	if r.lastMap == nil {
+		return mappingEvent{}, "no-current-mapping", false
+	}
+	mapping := *r.lastMap
+	mapping.PublicIP = append(net.IP(nil), r.lastMap.PublicIP...)
+	mapping.PrivateIP = append(net.IP(nil), r.lastMap.PrivateIP...)
+	if mapping.Protocol != "tcp" {
+		return mappingEvent{}, "protocol-mismatch", false
+	}
+	if mapping.PublicIP == nil || mapping.PublicPort <= 0 {
+		return mappingEvent{}, "invalid-public-mapping", false
+	}
+	if mapping.PrivatePort != privatePort {
+		return mappingEvent{}, "private-endpoint-changed", false
+	}
+	if mapping.PrivateIP == nil || mapping.PrivateIP.IsUnspecified() {
+		mapping.PrivateIP = append(net.IP(nil), privateIP...)
+	}
+	return mapping, "", true
+}
+
+func (r *Runner) checkTCPPublicMapping(ctx context.Context, mapping mappingEvent) (PortCheck, error) {
+	if mapping.PublicIP == nil || mapping.PublicPort <= 0 {
+		return PortCheck{}, errNoTCPMapping
+	}
+	if ctx.Err() != nil {
+		return PortCheck{}, errStopped
+	}
+
+	target := net.JoinHostPort(mapping.PublicIP.String(), strconv.Itoa(mapping.PublicPort))
+	checkCtx, cancel := context.WithTimeout(ctx, tcpPublicReachabilityTimeout)
+	defer cancel()
+	dialer := net.Dialer{
+		Timeout: tcpPublicReachabilityTimeout,
+		Control: socketControl(r.cfg.Interface, r.cfg.FWMark),
+	}
+	started := time.Now()
+	conn, err := dialer.DialContext(checkCtx, networkFor("tcp"), target)
+	checkedAt := time.Now()
+	if err != nil {
+		if ctx.Err() != nil {
+			return PortCheck{}, ctx.Err()
+		}
+		return PortCheck{
+			Protocol:  "tcp",
+			State:     classifyTCPCheckError(err),
+			CheckedAt: checkedAt,
+			Message:   err.Error(),
+		}, err
+	}
+	_ = conn.Close()
+	return PortCheck{
+		Protocol:  "tcp",
+		State:     "open",
+		LatencyMs: maxInt64(1, time.Since(started).Milliseconds()),
+		CheckedAt: checkedAt,
+		Message:   "tcp public mapping reachable after keepalive reconnect",
+	}, nil
 }
 
 func (r *Runner) reconnectTCPKeepAliveForProbe(ctx context.Context, network string, privateIP net.IP, privatePort int, current ServerEndpoint, endpoints []ServerEndpoint) (ServerEndpoint, *net.TCPAddr, *net.TCPConn, func(), int64, error) {
@@ -1392,6 +1489,13 @@ func publicProbeMaxAttempts(confirmations, endpointCount int) int {
 
 func samePublicProbeResult(a, b stunResult) bool {
 	return a.Port == b.Port && a.IP.Equal(b.IP)
+}
+
+func formatMappingEndpoint(mapping mappingEvent) string {
+	if mapping.PublicIP == nil || mapping.PublicPort <= 0 {
+		return "-"
+	}
+	return net.JoinHostPort(mapping.PublicIP.String(), strconv.Itoa(mapping.PublicPort))
 }
 
 func formatPublicProbeResult(result stunResult) string {
