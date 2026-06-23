@@ -1613,50 +1613,6 @@ func (r *Runner) stunUDPSharedFanout(ctx context.Context, conn *net.UDPConn, res
 	return stunResult{}, ServerEndpoint{}, errors.New("stun response timeout")
 }
 
-func (r *Runner) stunUDPShared(ctx context.Context, conn *net.UDPConn, addr *net.UDPAddr, responses <-chan stunResult) (stunResult, error) {
-	request, tid, err := stunRequest()
-	if err != nil {
-		return stunResult{}, err
-	}
-
-	timeout, retries := r.udpSTUNTiming()
-
-	for attempt := 0; attempt < retries; attempt++ {
-		if ctx.Err() != nil {
-			return stunResult{}, ctx.Err()
-		}
-		if _, err := conn.WriteToUDP(request, addr); err != nil {
-			if ctx.Err() != nil {
-				return stunResult{}, ctx.Err()
-			}
-			return stunResult{}, err
-		}
-
-		timer := time.NewTimer(timeout)
-		for {
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return stunResult{}, ctx.Err()
-			case result, ok := <-responses:
-				if !ok {
-					timer.Stop()
-					return stunResult{}, errors.New("stun response channel closed")
-				}
-				if result.TID == tid && stunSourceMatches(result.Source, addr) {
-					timer.Stop()
-					return result, nil
-				}
-			case <-timer.C:
-				goto retry
-			}
-		}
-	retry:
-	}
-
-	return stunResult{}, errors.New("stun response timeout")
-}
-
 func stunSourceMatches(source string, expected *net.UDPAddr) bool {
 	if source == "" || expected == nil {
 		return true
@@ -1933,10 +1889,6 @@ func (r *Runner) logInfo(format string, args ...any) {
 
 func (r *Runner) logWarn(format string, args ...any) {
 	r.log("warn", format, args...)
-}
-
-func (r *Runner) logError(format string, args ...any) {
-	r.log("error", format, args...)
 }
 
 func (r *Runner) log(level, format string, args ...any) {

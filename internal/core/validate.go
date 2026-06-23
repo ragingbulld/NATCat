@@ -128,18 +128,6 @@ func endpointHostPort(endpoint ServerEndpoint) string {
 	return hostPort(endpoint.Host, endpoint.Port)
 }
 
-func publicProbeHostPort(cfg InstanceConfig) string {
-	host := cfg.STUNHost
-	if host == "" {
-		host = defaultProbeHost
-	}
-	port := cfg.STUNPort
-	if port <= 0 {
-		port = defaultProbePort
-	}
-	return hostPort(host, port)
-}
-
 func normalizeServerEndpoints(servers []ServerEndpoint, defaultPort int) []ServerEndpoint {
 	out := make([]ServerEndpoint, 0, len(servers))
 	seen := map[string]struct{}{}

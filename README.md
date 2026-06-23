@@ -120,7 +120,7 @@ curl "https://example.com/hook?endpoint=$NATCAT_PUBLIC_ENDPOINT"
 
 ## Public Mapping Confirmation
 
-Each instance has a confirmation count. The default is `3`.
+Each instance has a confirmation count. The default is `2`.
 
 When STUN returns a public mapping, NATCat requires the same `IP:port` result to be confirmed repeatedly before publishing it to the UI or running notification scripts. Set the count to `1` to use a single STUN result.
 
